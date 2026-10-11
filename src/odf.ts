@@ -1,4 +1,4 @@
-import { clip, type RunContext } from './context';
+import { clip, type ZipContext } from './context';
 import { StopError } from './errors';
 import { ODF_FORMATS } from './formats';
 import { callsDde } from './formulas';
@@ -80,7 +80,7 @@ class EntryRules implements XmlHandler {
   private script?: { depth: number; language: string; content: boolean };
 
   constructor(
-    private readonly ctx: RunContext,
+    private readonly ctx: ZipContext,
     private readonly entry: string,
     /** Whether an object refers to each entry, by key. Only entries are kept, so a part full of references costs no memory. */
     private readonly oleRefs: Map<string, boolean>,
@@ -168,7 +168,7 @@ interface Manifest {
 }
 
 /** The manifest. Only paths that name an entry of the archive are kept, so a manifest of millions costs no memory. */
-async function readManifest(ctx: RunContext, entry: ZipEntry): Promise<Manifest> {
+async function readManifest(ctx: ZipContext, entry: ZipEntry): Promise<Manifest> {
   const keys = new Set(ctx.zip.entries.map(e => nameKey(e.name)));
   const m: Manifest = { paths: new Set(), encrypted: false };
   await ctx.parse(entry, {
@@ -206,7 +206,7 @@ function folderOf(name: string): { prefix: string; detail: D; category: C } | un
 const MAX_MIMETYPE = 256;
 
 /** Inspects an OpenDocument package. */
-export async function inspectOdf(ctx: RunContext): Promise<void> {
+export async function inspectOdf(ctx: ZipContext): Promise<void> {
   const zip = ctx.zip;
   const mimetype = zip.entries.find(e => e.name === 'mimetype');
   const manifestEntry = zip.get('META-INF/manifest.xml');

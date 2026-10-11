@@ -21,8 +21,8 @@ def(C.Container, D.NotZip, 'reject', 0, 'The file is not a ZIP archive, or it is
 def(C.Container, D.AmbiguousEnd, 'reject', 0, 'The archive has more than one end record a reader could pick');
 def(C.Container, D.MultiDisk, 'reject', 0, 'The archive claims to span several disks');
 def(C.Container, D.DirectoryMismatch, 'reject', 0, "The archive's end record disagrees with its central directory");
-def(C.Container, D.OutOfRange, 'reject', 0, 'An entry or the central directory lies outside the file');
-def(C.Container, D.Overlap, 'reject', 0, 'Two entries in the archive share bytes');
+def(C.Container, D.OutOfRange, 'reject', 0, 'An entry, a sector or a directory lies outside the file');
+def(C.Container, D.Overlap, 'reject', 0, 'Two entries or streams of the file share bytes');
 def(C.Container, D.HeaderMismatch, 'reject', 0, 'A local header contradicts the central directory<: {name}|>');
 def(C.Container, D.DuplicateName, 'reject', 0, 'Two entries have the same name, ignoring case<: {name}|>');
 def(C.Container, D.UnsafeName, 'reject', 0, 'An entry name is unsafe to use as a path<: {name}|>');
@@ -31,10 +31,15 @@ def(C.Container, D.EncryptedEntry, 'reject', 0, 'An entry is encrypted<: {name}|
 def(C.Container, D.UnsupportedMethod, 'reject', 0, 'An entry uses a compression method other than stored or deflate<: {name}|>');
 def(C.Container, D.Zip64Mismatch, 'reject', 0, 'ZIP64 fields disagree with the fields they extend');
 def(C.Container, D.BadExtraField, 'reject', 0, 'An extra field block does not parse<: {name}|>');
-def(C.Container, D.DataError, 'reject', 0, "An entry's data does not match its declared size and checksum<: {name}|>");
+def(C.Container, D.DataError, 'reject', 0, "An entry's data does not match its declared size or checksum<: {name}|>");
 def(C.Container, D.LeadingBytes, 'strip', 10, 'Data before the first entry of the archive');
-def(C.Container, D.HiddenData, 'strip', 20, 'Data between entries of the archive that no entry covers');
-def(C.Container, D.TrailingBytes, 'strip', 10, 'Data after the end of the archive');
+def(C.Container, D.HiddenData, 'strip', 20, 'Data in the file that no entry or stream covers');
+def(C.Container, D.TrailingBytes, 'strip', 10, 'Data after the end of the archive or compound file');
+def(C.Container, D.BadHeader, 'reject', 0, 'The compound file header is invalid<: {reason}|>');
+def(C.Container, D.BrokenChain, 'reject', 0, 'A sector chain of the compound file runs into a free or reserved sector');
+def(C.Container, D.ChainLoop, 'reject', 0, 'A sector chain of the compound file loops');
+def(C.Container, D.DirectoryLoop, 'reject', 0, 'The compound file directory reaches one entry twice');
+def(C.Container, D.BadEntry, 'reject', 0, 'A compound file directory entry is invalid<: {reason}|>');
 // XML. MALFORMED and ENCODING stop the run.
 def(C.Xml, D.Doctype, 'info', 0, 'An XML part declares a document type<: {part}|>');
 def(C.Xml, D.InternalSubset, 'strip', 20, 'An XML part declares entities or other markup in its document type<: {part}|>');
@@ -43,17 +48,18 @@ def(C.Xml, D.Malformed, 'reject', 0, 'An XML part is not well-formed<: {part}|>'
 def(C.Xml, D.Encoding, 'reject', 0, 'An XML part is not in valid UTF-8 or UTF-16<: {part}|>');
 // LIMIT
 def(C.Limit, D.FileSize, 'reject', 0, 'The file exceeds the file size limit');
-def(C.Limit, D.EntryCount, 'reject', 0, 'The archive exceeds the entry count limit');
+def(C.Limit, D.EntryCount, 'reject', 0, 'The file exceeds the entry count limit');
 def(C.Limit, D.DecompressedSize, 'reject', 0, 'An entry exceeds the decompressed size limit');
-def(C.Limit, D.TotalDecompressedSize, 'reject', 0, 'The archive exceeds the total decompressed size limit');
+def(C.Limit, D.TotalDecompressedSize, 'reject', 0, 'The file exceeds the total decompressed size limit');
 def(C.Limit, D.XmlDepth, 'reject', 0, 'An XML part exceeds the element depth limit');
 def(C.Limit, D.XmlTokenSize, 'reject', 0, 'An XML part exceeds the token size limit');
 def(C.Limit, D.XmlEntityDepth, 'reject', 0, 'An XML part exceeds the entity nesting limit');
 def(C.Limit, D.XmlEntityExpansions, 'reject', 0, 'The file exceeds the entity expansion limit');
 def(C.Limit, D.XmlEntitySize, 'reject', 0, 'The file exceeds the expanded entity size limit');
+def(C.Limit, D.RtfDepth, 'reject', 0, 'The RTF file exceeds the group nesting limit');
 def(C.Limit, D.Time, 'reject', 0, 'The file exceeds the time limit');
 // PACKAGE
-def(C.Package, D.Unrecognized, 'reject', 0, 'The file is not a recognized Office or OpenDocument package');
+def(C.Package, D.Unrecognized, 'reject', 0, 'The file is not a recognized Office or OpenDocument file');
 def(C.Package, D.AmbiguousFormat, 'reject', 0, 'The file can be read as more than one format');
 def(C.Package, D.Unreadable, 'reject', 0, 'The file could not be read');
 def(C.Package, D.DuplicateEntry, 'reject', 0, 'The package names one thing twice, and readers may pick either');
@@ -62,9 +68,19 @@ def(C.Package, D.UnreferencedPart, 'strip', 0, 'A part nothing in the package re
 def(C.Package, D.OdfLayout, 'strip', 10, 'The OpenDocument package layout is irregular<: {reason}|>');
 // ENCRYPTED
 def(C.Encrypted, D.PasswordRequired, 'reject', 0, 'The document is encrypted with a password');
+def(C.Encrypted, D.DefaultPassword, 'strip', 10, 'The file is encrypted with VelvetSweatshop, the password Excel opens it with without asking');
+def(C.Encrypted, D.UserPassword, 'strip', 0, 'The file was decrypted with the supplied password');
+def(C.Encrypted, D.Rc4_40, 'info', 0, 'Encryption is RC4 with a 40-bit key');
+def(C.Encrypted, D.Rc4_128, 'info', 0, 'Encryption is RC4 with a 128-bit key');
+def(C.Encrypted, D.Rc4Other, 'info', 0, 'Encryption is RC4 with a <{bits}|longer>-bit key');
+def(C.Encrypted, D.Aes128, 'info', 0, 'Encryption is AES with a 128-bit key');
+def(C.Encrypted, D.Aes192, 'info', 0, 'Encryption is AES with a 192-bit key');
+def(C.Encrypted, D.Aes256, 'info', 0, 'Encryption is AES with a 256-bit key');
+def(C.Encrypted, D.UnsupportedAlgorithm, 'reject', 0, 'The file is encrypted with an algorithm office-defuse does not decrypt<: {algorithm}|>');
 // MACRO
 def(C.Macro, D.VbaProject, 'strip', 70, 'The document holds VBA macros');
 def(C.Macro, D.XlmMacrosheet, 'strip', 70, 'The workbook holds an Excel 4.0 macro sheet');
+def(C.Macro, D.WordBasic, 'strip', 70, 'The Word 6.0 or 95 document holds WordBasic macros, which Word runs as VBA');
 def(C.Macro, D.OdfBasic, 'strip', 70, 'The document holds Basic macros');
 def(C.Macro, D.OdfScripts, 'strip', 70, 'The document holds scripts');
 def(C.Macro, D.OdfDialogs, 'strip', 30, 'The document holds Basic dialogs, which call macros');
@@ -78,6 +94,7 @@ def(C.Ui, D.OdfConfiguration, 'strip', 10, 'The document carries its own menu, t
 // ACTION
 def(C.Action, D.RunProgram, 'strip', 80, 'A click or hover runs a program or opens a file');
 def(C.Action, D.OleVerb, 'strip', 40, 'A click or hover activates an embedded object');
+def(C.Action, D.ObjectUpdate, 'strip', 50, 'An embedded object updates itself as the document opens, which starts the program it belongs to');
 // DDE
 def(C.Dde, D.Field, 'strip', 70, 'A field runs a command through DDE');
 def(C.Dde, D.Link, 'strip', 70, 'A DDE link asks another program for data<: {application}|>');
@@ -108,11 +125,13 @@ def(C.Link, D.LookalikeHost, 'strip', 40, "A link's host uses punycode or mixed 
 def(C.Link, D.EncodedHost, 'strip', 40, "A link's host is percent-encoded");
 def(C.Link, D.Relative, 'strip', 30, "A relative link, which resolves against the file's own location");
 // EMBEDDED
-def(C.Embedded, D.OleObject, 'strip', 40, 'An embedded OLE object');
+def(C.Embedded, D.OleObject, 'strip', 40, 'An embedded OLE object<, which holds the file {fileName}|>');
 def(C.Embedded, D.Package, 'strip', 30, 'An embedded document<: {contentType}|>');
 def(C.Embedded, D.OleFile, 'strip', 40, 'A part holds an OLE file that nothing declares as an object');
 def(C.Embedded, D.Applet, 'strip', 60, 'An embedded Java applet');
 def(C.Embedded, D.Plugin, 'strip', 50, 'An embedded browser plug-in object');
+def(C.Embedded, D.Equation, 'strip', 70, 'An Equation Editor 3.0 object, which CVE-2017-11882 and CVE-2018-0802 exploit');
+def(C.Embedded, D.Attachment, 'strip', 30, '<An attached file "{name}"|An attached file> (<{type}|unknown type>)');
 // CONTROL
 def(C.Control, D.ActiveX, 'strip', 50, 'An ActiveX control');
 

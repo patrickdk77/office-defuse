@@ -4,18 +4,29 @@
 #   python3 -I scripts/make-fixtures.py
 #   python3 -I scripts/make-fixtures.py cases    # cases/ alone, which needs only Python
 #
-# lo/     LibreOffice exports of the flat ODF sources below, as LibreOffice writes them.
+# lo/     LibreOffice exports of the flat ODF sources below, as LibreOffice writes them, in OOXML, ODF, the binary
+#         formats and RTF.
 # docs/   LibreOffice exports with macros, fields, relationships, objects and controls added with zipfile, and
 #         packages LibreOffice cannot write (Visio, .xlam, .odb), built by hand.
 # zip/    Archives built byte by byte to break one rule of the ZIP format each.
+# ole/    Word, Excel, PowerPoint, Visio, Outlook, Publisher and Project files and encrypted packages, written byte by
+#         byte with the compound file writer below. Encryption uses fixed salts and keys, so a rebuild writes the same
+#         bytes.
+# rtf/    RTF files with objects, fields, links and the obfuscations rtfobj documents.
+# cfb/    Compound files that each break one rule of MS-CFB.
 # cases/  One package for each behavior the corpus census found. A rebuild writes the same bytes.
-#         manifest.json, kept by hand, says what each file stands in for and what office-defuse reports.
+#         manifest.json, kept by hand, gives each file's issue and what office-defuse reports.
 #
-# LibreOffice stamps dates into what it writes, so a rebuild of lo/ and docs/ changes bytes but not what the tests
-# check.
+# LibreOffice, zipfile and Info-ZIP write the time they run into each archive entry, and LibreOffice writes random
+# revision ids. The script seeds LibreOffice's random numbers and sets every entry's time to 2026-01-01, so a rebuild
+# writes the same bytes.
+import base64
+import hashlib
+import hmac
 import io
 import json
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -28,7 +39,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, 'test', 'fixtures')
 TMP = tempfile.mkdtemp(prefix='office-defuse-fixtures-')
 
-# A compound file header and nothing else. office-defuse only checks the signature; ole-defuse reads inside.
+# A compound file header and nothing else. In a ZIP package, office-defuse checks only an OLE part's signature.
 FAKE_OLE = bytes.fromhex('d0cf11e0a1b11ae1') + bytes(504)
 
 W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
@@ -127,6 +138,13 @@ EXPORTS = [
     ('links.fodt', 'links.odt', 'odt'),
     ('dde.fodt', 'dde.odt', 'odt'),
     ('dde.fods', 'dde.ods', 'ods'),
+    ('doc.fodt', 'clean.doc', 'doc'),
+    ('doc.fodt', 'clean.rtf', 'rtf'),
+    ('sheet.fods', 'clean.xls', 'xls'),
+    ('pres.fodp', 'clean.ppt', 'ppt'),
+    ('links.fodt', 'links.doc', 'doc'),
+    ('links.fodt', 'links.rtf', 'rtf'),
+    ('dde.fods', 'dde.xls', 'xls'),
 ]
 
 
@@ -146,14 +164,91 @@ def soffice_exports():
     for source, name, target in EXPORTS:
         work = os.path.join(TMP, 'convert', name)
         os.makedirs(work)
+        # SAL_RAND_REPEATABLE seeds LibreOffice's random numbers, which it writes as revision ids.
         subprocess.run(
             ['soffice', '-env:UserInstallation=' + profile, '--headless', '--convert-to', target, '--outdir', work, os.path.join(src, source)],
-            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=180,
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=180, env=dict(os.environ, SAL_RAND_REPEATABLE='1'),
         )
         produced = [f for f in os.listdir(work) if f.endswith('.' + target)]
         if len(produced) != 1:
             sys.exit('soffice made no %s from %s' % (target, source))
         shutil.copyfile(os.path.join(work, produced[0]), out('lo', name))
+        fixed_ids(out('lo', name))
+        fixed_times(out('lo', name))
+
+
+def fixed_times(path):
+    """Sets the date and time of every entry of the ZIP archive at `path` to 2026-01-01 00:00, in its local headers
+    and its central directory, and changes nothing else. LibreOffice, zipfile and Info-ZIP write the time they run."""
+    try:
+        with zipfile.ZipFile(path) as z:
+            infos, start = z.infolist(), z.start_dir
+    except (zipfile.BadZipFile, OSError, ValueError, NotImplementedError, EOFError):
+        return
+    with open(path, 'rb') as f:
+        data = bytearray(f.read())
+    when = (0, ((2026 - 1980) << 9) | (1 << 5) | 1)
+    for info in infos:
+        if data[info.header_offset:info.header_offset + 4] == b'PK\x03\x04':
+            struct.pack_into('<HH', data, info.header_offset + 10, *when)
+    at = start
+    while data[at:at + 4] == b'PK\x01\x02':
+        struct.pack_into('<HH', data, at + 12, *when)
+        at += 46 + sum(struct.unpack_from('<HHH', data, at + 28))
+    with open(path, 'wb') as f:
+        f.write(data)
+
+
+def fixed_ids(path):
+    """LibreOffice gives each slide number field a random GUID. This writes fixed ones in their place, deflates again
+    only the entries that change, and keeps every other byte of LibreOffice's archive."""
+    with open(path, 'rb') as f:
+        data = f.read()
+    try:
+        z = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile:
+        return
+    infos, count = z.infolist(), [0]
+
+    def guid(_):
+        count[0] += 1
+        return b'id="{00000000-0000-4000-8000-%012X}"' % count[0]
+    out, offsets, changed = bytearray(), [], {}
+    for k, info in enumerate(infos):
+        end = infos[k + 1].header_offset if k + 1 < len(infos) else z.start_dir
+        raw = data[info.header_offset:end]
+        content = z.read(info)
+        fixed = re.sub(rb'id="\{[0-9A-Fa-f-]{36}\}"', guid, content)
+        if fixed != content:
+            n, m = struct.unpack_from('<HH', raw, 26)
+            head = bytearray(raw[:30 + n + m])
+            tail = raw[30 + n + m + info.compress_size:]
+            deflate = zlib.compressobj(6, zlib.DEFLATED, -15)
+            payload = deflate.compress(fixed) + deflate.flush()
+            crc = zlib.crc32(fixed) & 0xffffffff
+            if info.flag_bits & 8:
+                signed = tail[:4] == b'PK\x07\x08'
+                tail = (b'PK\x07\x08' if signed else b'') + struct.pack('<III', crc, len(payload), len(fixed))
+            else:
+                struct.pack_into('<III', head, 14, crc, len(payload), len(fixed))
+            raw = bytes(head) + payload + tail
+            changed[k] = (crc, len(payload), len(fixed))
+        offsets.append(len(out))
+        out += raw
+    if not changed:
+        return
+    end_at = data.rindex(b'PK\x05\x06')
+    cd = bytearray(data[z.start_dir:end_at])
+    at = 0
+    for k in range(len(infos)):
+        struct.pack_into('<I', cd, at + 42, offsets[k])
+        if k in changed:
+            struct.pack_into('<III', cd, at + 16, *changed[k])
+        at += 46 + sum(struct.unpack_from('<HHH', cd, at + 28))
+    end = bytearray(data[end_at:])
+    struct.pack_into('<I', end, 16, len(out))
+    with open(path, 'wb') as f:
+        f.write(bytes(out) + bytes(cd) + bytes(end))
 
 
 def read_zip(path):
@@ -455,14 +550,25 @@ def docs():
     ])
 
     # OpenDocument with the stored mimetype first, written with Info-ZIP zip the way the ODF specification shows.
-    tree = os.path.join(TMP, 'ziptree')
-    with zipfile.ZipFile(lo('clean.odt')) as z:
-        z.extractall(tree)
+    # Each entry is written by hand, and only after its path is checked to resolve inside the tree.
+    tree = os.path.realpath(os.path.join(TMP, 'ziptree'))
+    for info, data in read_zip(lo('clean.odt')):
+        path = os.path.realpath(os.path.join(tree, info.filename))
+        if not path.startswith(tree + os.sep):
+            sys.exit('clean.odt names a path outside the tree: %r' % info.filename)
+        if info.is_dir():
+            os.makedirs(path, exist_ok=True)
+            continue
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'wb') as f:
+            f.write(data)
     target = out('docs', 'infozip.odt')
     if os.path.exists(target):
         os.remove(target)
     subprocess.run(['zip', '-q', '-X', '-0', target, 'mimetype'], cwd=tree, check=True)
-    subprocess.run(['zip', '-q', '-X', '-r', target, '.', '-x', 'mimetype'], cwd=tree, check=True)
+    # Named one by one, in order, since the order a directory lists its files in can change from run to run.
+    names = sorted(os.path.relpath(os.path.join(d, n), tree) + ('/' if n in dirs else '') for d, dirs, files in os.walk(tree) for n in dirs + files)
+    subprocess.run(['zip', '-q', '-X', target] + [n for n in names if n != 'mimetype'], cwd=tree, check=True)
 
     # OpenDocument whose mimetype is compressed and last.
     items = read_zip(lo('clean.odt'))
@@ -1014,6 +1120,1091 @@ ODF_BASIC_FILES = [('Basic/script-lc.xml', b'<?xml version="1.0" encoding="UTF-8
 ODF_ON_LOAD = ('<office:scripts><office:event-listeners><script:event-listener script:language="ooo:script" script:event-name="dom:load" '
                'xlink:href="vnd.sun.star.script:Standard.Module1.Marker?language=Basic&amp;location=document"/></office:event-listeners></office:scripts>')
 
+# ---------- compound files, written byte by byte ----------
+#
+# A compound file (MS-CFB) is a header, a FAT of sector chains, a directory of red-black trees, and a mini stream for
+# streams under 4,096 bytes. cfb() lays one out from a tree of Stream and Storage values. `mutate` gets the model before
+# it becomes bytes, so a fixture can break one rule of the format: a chain that loops, two streams sharing a sector, a
+# directory entry reached twice, a sector past the end of the file.
+
+ENDOFCHAIN, FREESECT, FATSECT, NOSTREAM = 0xFFFFFFFE, 0xFFFFFFFF, 0xFFFFFFFD, 0xFFFFFFFF
+CFB_SIG = bytes.fromhex('d0cf11e0a1b11ae1')
+
+
+class Stream:
+    def __init__(self, name, data):
+        self.name, self.data = name, data
+
+
+class Storage:
+    def __init__(self, name, children, clsid=None):
+        self.name, self.children, self.clsid = name, children, clsid
+
+
+def clsid_bytes(text):
+    """A GUID as Windows writes it, '0002CE02-0000-0000-C000-000000000046', in the byte order a file holds."""
+    if text is None:
+        return bytes(16)
+    h = text.replace('-', '')
+    b = bytes.fromhex(h)
+    return b[3::-1] + b[5:3:-1] + b[7:5:-1] + b[8:]
+
+
+def cfb(root_children, root_clsid=None, mutate=None, trailing=b'', version=3, fat_sectors=1):
+    """A compound file holding `root_children`: version 3 with 512-byte sectors, or 4 with 4,096-byte ones. Siblings form a
+    balanced tree, sorted as MS-CFB sorts them. `fat_sectors` asks for at least that many FAT sectors, past 109 of which a
+    DIFAT chain lists the rest."""
+    ss = 512 if version == 3 else 4096
+    per = ss // 4
+    entries = []  # [kind, name, data or None, clsid, left, right, child]
+
+    def add(node):
+        i = len(entries)
+        if isinstance(node, Stream):
+            entries.append(['stream', node.name, node.data, None, NOSTREAM, NOSTREAM, NOSTREAM])
+        else:
+            entries.append(['storage', node.name, None, node.clsid, NOSTREAM, NOSTREAM, NOSTREAM])
+        return i
+
+    def tree(ids):
+        if not ids:
+            return NOSTREAM
+        mid = len(ids) // 2
+        entries[ids[mid]][4] = tree(ids[:mid])
+        entries[ids[mid]][5] = tree(ids[mid + 1:])
+        return ids[mid]
+
+    def build(index, children):
+        ids = [add(c) for c in children]
+        for c, i in zip(children, ids):
+            if isinstance(c, Storage):
+                build(i, c.children)
+        ids.sort(key=lambda i: (len(entries[i][1]), entries[i][1].upper()))
+        entries[index][6] = tree(ids)
+
+    entries.append(['root', 'Root Entry', None, root_clsid, NOSTREAM, NOSTREAM, NOSTREAM])
+    build(0, root_children)
+
+    # The mini stream holds every stream under 4,096 bytes, in 64-byte mini sectors.
+    mini, minifat, starts = bytearray(), [], {}
+    for i, e in enumerate(entries):
+        if e[0] == 'stream' and 0 < len(e[2]) < 4096:
+            n = (len(e[2]) + 63) // 64
+            first = len(mini) // 64
+            starts[i] = first
+            minifat += [first + k + 1 for k in range(n - 1)] + [ENDOFCHAIN]
+            mini += e[2] + bytes(n * 64 - len(e[2]))
+    big = [i for i, e in enumerate(entries) if e[0] == 'stream' and len(e[2]) >= 4096]
+    dir_n = (len(entries) * 128 + ss - 1) // ss
+    minifat_n = (len(minifat) * 4 + ss - 1) // ss
+    mini_n = (len(mini) + ss - 1) // ss
+    data_n = sum((len(entries[i][2]) + ss - 1) // ss for i in big)
+    fat_n = fat_sectors
+    difat_n = 0
+    while True:
+        difat_n = (fat_n - 109 + per - 2) // (per - 1) if fat_n > 109 else 0
+        if fat_n * per >= fat_n + difat_n + dir_n + minifat_n + mini_n + data_n:
+            break
+        fat_n += 1
+    layout = {'fat': list(range(fat_n)), 'difat': list(range(fat_n, fat_n + difat_n))}
+    pos = fat_n + difat_n
+
+    def take(n):
+        nonlocal pos
+        out = list(range(pos, pos + n))
+        pos += n
+        return out
+    layout['dir'] = take(dir_n)
+    layout['minifat'] = take(minifat_n)
+    layout['mini'] = take(mini_n)
+    layout['streams'] = {i: take((len(entries[i][2]) + ss - 1) // ss) for i in big}
+    fat = [FREESECT] * (fat_n * per)
+    for s in layout['fat']:
+        fat[s] = FATSECT
+    for s in layout['difat']:
+        fat[s] = 0xFFFFFFFC
+
+    def chain(sectors):
+        for a, b in zip(sectors, sectors[1:]):
+            fat[a] = b
+        if sectors:
+            fat[sectors[-1]] = ENDOFCHAIN
+    for key in ('dir', 'minifat', 'mini'):
+        chain(layout[key])
+    for sectors in layout['streams'].values():
+        chain(sectors)
+    sector_data = {}
+
+    def put(sectors, data):
+        for k, s in enumerate(sectors):
+            sector_data[s] = bytes(data[k * ss:(k + 1) * ss]).ljust(ss, b'\0')
+    put(layout['mini'], bytes(mini))
+    for i, sectors in layout['streams'].items():
+        put(sectors, entries[i][2])
+
+    directory = []
+    for i, e in enumerate(entries):
+        name = e[1].encode('utf-16-le')
+        kind = {'root': 5, 'storage': 1, 'stream': 2}[e[0]]
+        if e[0] == 'root':
+            start, size = (layout['mini'][0] if mini else ENDOFCHAIN), len(mini)
+        elif e[0] == 'storage':
+            start, size = 0, 0
+        elif len(e[2]) >= 4096:
+            start, size = layout['streams'][i][0], len(e[2])
+        else:
+            start, size = (starts[i] if e[2] else ENDOFCHAIN), len(e[2])
+        d = bytearray(128)
+        d[0:len(name)] = name
+        struct.pack_into('<HBBIII', d, 64, len(name) + 2, kind, 1, e[4], e[5], e[6])
+        d[80:96] = clsid_bytes(e[3])
+        struct.pack_into('<IQ', d, 116, start, size)
+        directory.append(d)
+    while len(directory) % (ss // 128):
+        d = bytearray(128)
+        struct.pack_into('<III', d, 68, NOSTREAM, NOSTREAM, NOSTREAM)
+        directory.append(d)
+    dir_n = len(directory) * 128 // ss
+
+    header = bytearray(ss)
+    header[0:8] = CFB_SIG
+    struct.pack_into('<HHHHH', header, 24, 0x3E, version, 0xFFFE, 9 if version == 3 else 12, 6)
+    struct.pack_into('<IIIIIIIII', header, 40, 0 if version == 3 else dir_n, fat_n, layout['dir'][0], 0, 4096,
+                     layout['minifat'][0] if minifat_n else ENDOFCHAIN, minifat_n, layout['difat'][0] if difat_n else ENDOFCHAIN, difat_n)
+    for k in range(109):
+        struct.pack_into('<I', header, 76 + 4 * k, layout['fat'][k] if k < fat_n else FREESECT)
+    rest = layout['fat'][109:]
+    for k, s in enumerate(layout['difat']):
+        listed = rest[k * (per - 1):(k + 1) * (per - 1)]
+        nxt = layout['difat'][k + 1] if k + 1 < difat_n else ENDOFCHAIN
+        sector_data[s] = b''.join(struct.pack('<I', v) for v in listed + [FREESECT] * (per - 1 - len(listed)) + [nxt])
+    model = {'header': header, 'fat': fat, 'minifat': minifat, 'dir': directory, 'layout': layout, 'sectors': sector_data, 'count': pos, 'trailing': trailing, 'ss': ss}
+    if mutate:
+        mutate(model)
+    put(model['layout']['minifat'], b''.join(struct.pack('<I', v) for v in model['minifat']))
+    out = bytearray(model['header'])
+    n = ss // 128
+    for s in range(model['count']):
+        if s in model['layout']['fat']:
+            k = model['layout']['fat'].index(s)
+            out += b''.join(struct.pack('<I', v) for v in model['fat'][k * per:(k + 1) * per])
+        elif s in model['layout']['dir']:
+            k = model['layout']['dir'].index(s)
+            out += b''.join(bytes(d) for d in model['dir'][k * n:(k + 1) * n])
+        else:
+            out += model['sectors'].get(s, bytes(ss))
+    return bytes(out) + model['trailing']
+
+
+def entry_index(model, name):
+    """The directory position of the entry with this name."""
+    for k, d in enumerate(model['dir']):
+        n = struct.unpack_from('<H', d, 64)[0]
+        if bytes(d[:max(0, n - 2)]).decode('utf-16-le') == name:
+            return k
+    sys.exit('no directory entry %r' % name)
+
+
+def set_entry(model, name, **fields):
+    """Changes fields of a directory entry: type, left, right, child, start, size, name_length, name_bytes."""
+    d = model['dir'][entry_index(model, name)]
+    offsets = {'type': ('<B', 66), 'left': ('<I', 68), 'right': ('<I', 72), 'child': ('<I', 76), 'start': ('<I', 116), 'size': ('<Q', 120), 'name_length': ('<H', 64)}
+    for k, v in fields.items():
+        if k == 'name_bytes':
+            d[0:64] = v.ljust(64, b'\0')
+        else:
+            struct.pack_into(offsets[k][0], d, offsets[k][1], v)
+
+
+def set_header(model, **fields):
+    """Changes header fields: major, shift, mini_shift, byte_order, fat_count, first_dir, cutoff, minifat_count, difat_first, difat_count, difat0, difat1."""
+    offsets = {'major': ('<H', 26), 'byte_order': ('<H', 28), 'shift': ('<H', 30), 'mini_shift': ('<H', 32), 'fat_count': ('<I', 44), 'first_dir': ('<I', 48),
+               'cutoff': ('<I', 56), 'minifat_count': ('<I', 64), 'difat_first': ('<I', 68), 'difat_count': ('<I', 72), 'difat0': ('<I', 76), 'difat1': ('<I', 80)}
+    for k, v in fields.items():
+        struct.pack_into(offsets[k][0], model['header'], offsets[k][1], v)
+
+
+# ---------- OLE objects, as Office stores them in a storage or as OLE 1.0 data ----------
+
+EQUATION_CLSID = '0002CE02-0000-0000-C000-000000000046'
+URL_MONIKER = '79EAC9E0-BAF9-11CE-8C82-00AA004BA90B'
+FILE_MONIKER = '00000303-0000-0000-C000-000000000046'
+
+
+def lp_ansi(s):
+    """A LengthPrefixedAnsiString: a 32-bit count that includes the NUL, then the text and the NUL."""
+    b = s.encode('latin-1') + b'\0'
+    return struct.pack('<I', len(b)) + b
+
+
+def comp_obj(user_type, prog_id):
+    """A CompObj stream (MS-OLEDS 2.3.8): the user type, no clipboard format, and the ProgID."""
+    return struct.pack('<II', 0xFFFE0001, 0x00000A03) + bytes(20) + lp_ansi(user_type) + struct.pack('<I', 0) + lp_ansi(prog_id) + struct.pack('<I', 0x71B239F4) + bytes(12)
+
+
+def url_moniker(url):
+    s = url.encode('utf-16-le') + b'\0\0'
+    return clsid_bytes(URL_MONIKER) + struct.pack('<I', len(s)) + s
+
+
+def file_moniker(path):
+    ansi = path.encode('latin-1') + b'\0'
+    return clsid_bytes(FILE_MONIKER) + struct.pack('<HI', 0, len(ansi)) + ansi + struct.pack('<HH', 0xFFFF, 0xDEAD) + bytes(16) + struct.pack('<I', 0)
+
+
+def ole_stream(link=None):
+    """An OLE stream (MS-OLEDS 2.3.3). With `link`, a moniker, the object is linked and the moniker is its absolute source."""
+    if link is None:
+        return struct.pack('<IIIII', 0x02000001, 0, 0, 0, 0)
+    return struct.pack('<IIIII', 0x02000001, 1, 1, 0, 0) + struct.pack('<I', 0) + struct.pack('<I', len(link)) + link + struct.pack('<i', -1) + bytes(16) + struct.pack('<I', 0) + bytes(28)
+
+
+def package_native(file_name, source, temp, data):
+    """Packager's native data, as the Package class writes it: a type, the label, the source, then the temporary path and the file."""
+    return (struct.pack('<H', 2) + file_name.encode('latin-1') + b'\0' + source.encode('latin-1') + b'\0' + struct.pack('<HH', 0, 3)
+            + struct.pack('<I', len(temp) + 1) + temp.encode('latin-1') + b'\0' + struct.pack('<I', len(data)) + data)
+
+
+def ole_object(children, clsid=None, user_type='', prog_id='', link=None):
+    """The streams of an OLE object's storage: CompObj, the OLE stream and ObjInfo, before `children`."""
+    return [Stream('\x01CompObj', comp_obj(user_type, prog_id)), Stream('\x01Ole', ole_stream(link)), Stream('\x03ObjInfo', b'\x00\x00\x03\x00\x01\x00')] + children
+
+
+def ole1(class_name, native=b'', linked_topic=None):
+    """An OLE 1.0 object (MS-OLEDS 2.2), as RTF's objdata holds one: embedded with native data, or linked to a topic."""
+    if linked_topic is not None:
+        return struct.pack('<II', 0x00000501, 1) + lp_ansi(class_name) + lp_ansi(linked_topic) + lp_ansi('') + lp_ansi('') + struct.pack('<II', 0, 1)
+    return struct.pack('<II', 0x00000501, 2) + lp_ansi(class_name) + lp_ansi('') + lp_ansi('') + struct.pack('<I', len(native)) + native
+
+
+VBA_PROJECT = [Stream('PROJECT', b'ID="{00000000-0000-0000-0000-000000000000}"\r\nName="Project"\r\n'), Stream('PROJECTwm', b'\0\0'),
+               Storage('VBA', [Stream('dir', b'\x01inert marker, not a compressed dir stream'), Stream('_VBA_PROJECT', b'\xcc\x61\xff\xff\x00\x00\x00'),
+                               Stream('ThisDocument', b'inert marker')])]
+
+# ---------- Word 97 and Word 6.0 documents ----------
+
+
+def fib97(ccp_text, pairs, flags=0):
+    """A Word 97 FIB (MS-DOC 2.5.1): FibBase, 14 16-bit values, 22 32-bit values with ccpText, and 93 fc/lcb pairs."""
+    base = struct.pack('<HHHHHHHIBBHHII', 0xA5EC, 0xC1, 0, 0x0409, 0, flags | 0x1000, 0xBF, 0, 0, 0, 0, 0, 0, 0)
+    lw = [0] * 22
+    lw[3] = ccp_text
+    fc = [(0, 0)] * 93
+    for k, v in pairs.items():
+        fc[k] = v
+    return base + struct.pack('<H', 14) + bytes(28) + struct.pack('<H', 22) + struct.pack('<22I', *lw) + struct.pack('<H', 93) + b''.join(struct.pack('<II', a, b) for a, b in fc) + struct.pack('<H', 0)
+
+
+def sttb_unicode(strings):
+    return struct.pack('<HHH', 0xFFFF, len(strings), 0) + b''.join(struct.pack('<H', len(s)) + s.encode('utf-16-le') for s in strings)
+
+
+def word_doc(text, template=None, dot=False, encrypted=False, compressed=False, extra=(), clx=None, assoc=None, table='1Table', **cfb_options):
+    """A Word 97 document whose text is `text`, one piece, stored as UTF-16 or 8-bit. `template` goes in SttbfAssoc."""
+    text_at = 1024
+    stored = text.encode('latin-1') if compressed else text.encode('utf-16-le')
+    clx = clx if clx is not None else b'\x02' + struct.pack('<I', 4 * 2 + 8) + struct.pack('<II', 0, len(text)) + struct.pack('<HIH', 0, (text_at * 2) | 0x40000000 if compressed else text_at, 0)
+    data = bytearray(clx)
+    pairs = {33: (0, len(clx))}
+    if template is not None or assoc is not None:
+        assoc = assoc if assoc is not None else sttb_unicode(['', template])
+        pairs[32] = (len(data), len(assoc))
+        data += assoc
+    flags = (1 if dot else 0) | (0x0100 if encrypted else 0) | (0x0200 if table == '1Table' else 0)
+    fib = fib97(len(text), pairs, flags)
+    word = fib.ljust(text_at, b'\0') + stored
+    return cfb([Stream('WordDocument', word.ljust(4096, b'\0')), Stream(table, bytes(data)), Stream('\x01CompObj', comp_obj('Microsoft Word 97-2004 Document', 'Word.Document.8'))] + list(extra),
+               root_clsid='00020906-0000-0000-C000-000000000046', **cfb_options)
+
+
+def word6_doc(text, macros=0, dot=False, encrypted=False):
+    """A Word 6.0 document: its 8-bit text from fcMin to fcMac. `macros` sets the length of the macro table, at FIB offset 0x11C."""
+    fib = bytearray(0x300)
+    struct.pack_into('<HHHHHH', fib, 0, 0xA5DC, 0x65, 0, 0x0409, 0, (1 if dot else 0) | (0x0100 if encrypted else 0))
+    struct.pack_into('<II', fib, 0x18, 0x300, 0x300 + len(text))
+    struct.pack_into('<II', fib, 0x118, 0x300 + len(text), macros)
+    body = bytes(fib) + text.encode('latin-1') + bytes(macros)
+    return cfb([Stream('WordDocument', body.ljust(4096, b'\0'))])
+
+# ---------- Excel 5.0 to 2003 workbooks ----------
+
+
+def rec(t, body=b''):
+    return struct.pack('<HH', t, len(body)) + body
+
+
+def bof(dt, biff8=True):
+    return rec(0x0809, struct.pack('<HHHHII', 0x0600 if biff8 else 0x0500, dt, 0x0DBB, 0x07CC, 0, 0) if biff8 else struct.pack('<HHHH', 0x0500, dt, 0x0DBB, 0x07CC))
+
+
+def short_xl(s):
+    return struct.pack('<BB', len(s), 0) + s.encode('latin-1')
+
+
+def lbl(name, builtin=None):
+    """A Lbl record. A built-in name is one character, its index: 1 for Auto_Open."""
+    if builtin is not None:
+        return rec(0x0018, struct.pack('<HBBHHHBBBB', 0x0020, 0, 1, 0, 0, 0, 0, 0, 0, 0) + b'\x00' + bytes([builtin]))
+    return rec(0x0018, struct.pack('<HBBHHHBBBB', 0, 0, len(name), 0, 0, 0, 0, 0, 0, 0) + b'\x00' + name.encode('latin-1'))
+
+
+def workbook(sheets, globals_extra=b'', biff8=True, sheet_extra=None):
+    """A workbook stream: globals with a BoundSheet per sheet, then each sheet's substream. `sheets` holds (name, dt, bof type)."""
+    sheet_extra = sheet_extra or {}
+    sheet_streams = [bof(t, biff8) + sheet_extra.get(name, b'') + rec(0x000A) for name, _, t in sheets]
+    bound_size = [len(rec(0x0085, struct.pack('<IBB', 0, 0, 0) + (short_xl(n) if biff8 else struct.pack('<B', len(n)) + n.encode('latin-1')))) for n, _, _ in sheets]
+    head = bof(5, biff8) + globals_extra
+    pos = len(head) + sum(bound_size) + len(rec(0x000A))
+    bounds = b''
+    for (name, dt, _), stream in zip(sheets, sheet_streams):
+        bounds += rec(0x0085, struct.pack('<IBB', pos, 0 if dt != 1 else 1, dt) + (short_xl(name) if biff8 else struct.pack('<B', len(name)) + name.encode('latin-1')))
+        pos += len(stream)
+    return head + bounds + rec(0x000A) + b''.join(sheet_streams)
+
+
+def supbook(ctab, path):
+    return rec(0x01AE, struct.pack('<HH', ctab, len(path)) + b'\x00' + path.encode('latin-1'))
+
+
+def extern_name(name, flags):
+    return rec(0x0023, struct.pack('<HI', flags, 0) + struct.pack('<BB', len(name), 0) + name.encode('latin-1'))
+
+
+def obj_macro():
+    """An Obj record for a button: FtCmo, FtMacro with a formula naming a defined name, then FtEnd."""
+    cmo = struct.pack('<HHHHH', 0x15, 0x12, 7, 1, 0x6011) + bytes(12)
+    fmla = struct.pack('<HIH', 5, 0, 5) + b'\x23\x01\x00\x00\x00'
+    return rec(0x005D, cmo + struct.pack('<HH', 0x04, len(fmla)) + fmla + struct.pack('<HH', 0, 0))
+
+
+def hlink(target=None, file_path=None):
+    """An HLink record for cell A1, with a URL moniker or a file moniker."""
+    moniker = url_moniker(target) if target is not None else file_moniker(file_path)
+    return rec(0x01B8, struct.pack('<HHHH', 0, 0, 0, 0) + clsid_bytes('79EAC9D0-BAF9-11CE-8C82-00AA004BA90B') + struct.pack('<II', 2, 0x03) + moniker)
+
+
+def xls(sheets, globals_extra=b'', extra=(), sheet_extra=None, book=False, biff8=True):
+    stream = workbook(sheets, globals_extra, biff8, sheet_extra)
+    return cfb([Stream('Book' if book else 'Workbook', stream)] + list(extra), root_clsid='00020820-0000-0000-C000-000000000046')
+
+# ---------- PowerPoint 97 to 2003 presentations ----------
+
+
+def prec(t, body=b'', instance=0, container=False):
+    return struct.pack('<HHI', (instance << 4) | (0x0F if container else 0), t, len(body)) + body
+
+
+def cstring(text, instance):
+    return prec(0x0FBA, text.encode('utf-16-le'), instance)
+
+
+def ppt(objects=(), document=b'', slides=b'', encrypted=False, extra_persist=None):
+    """A presentation stream: a DocumentContainer, a slide, the persist objects, a persist directory and the current edit.
+    `objects` are (persist id, record) pairs that the directory names."""
+    out = bytearray()
+    offsets = {}
+    doc = prec(0x03E8, prec(0x03E9, bytes(40)) + document, container=True)
+    offsets[1] = len(out)
+    out += doc
+    offsets[2] = len(out)
+    out += prec(0x03EE, prec(0x03EF, bytes(24)) + slides, container=True)
+    for pid, record in objects:
+        offsets[pid] = len(out)
+        out += record
+    if extra_persist:
+        offsets.update(extra_persist(offsets))
+    ids = sorted(offsets)
+    directory = b''.join(struct.pack('<I', (1 << 20) | i) + struct.pack('<I', offsets[i]) for i in ids)
+    dir_at = len(out)
+    out += prec(0x1772, directory)
+    edit_at = len(out)
+    out += prec(0x0FF5, struct.pack('<IHBBIIIIHH', 0, 0, 0, 3, 0, dir_at, 1, max(ids) + 1, 1, 0))
+    user = prec(0x0FF6, struct.pack('<IIIHHBBH', 0x14, 0xF3D1C4DF if encrypted else 0xE391C05F, edit_at, 0, 0x03F4, 3, 0, 0))
+    return cfb([Stream('PowerPoint Document', bytes(out)), Stream('Current User', user)], root_clsid='64818D10-4F9B-11CF-86EA-00AA00B929E8')
+
+
+def ex_ole_stg(storage, compressed):
+    if compressed:
+        return prec(0x1011, struct.pack('<I', len(storage)) + zlib.compress(storage, 9), instance=1)
+    return prec(0x1011, storage)
+
+# ---------- Outlook messages ----------
+
+
+def props(entries, header):
+    """A property stream: `header` bytes, then a 16-byte entry per (tag, value) pair of 32-bit values."""
+    return bytes(header) + b''.join(struct.pack('<IIII', tag, 6, value, 0) for tag, value in entries)
+
+
+def attachment(n, method, name, mime=None, data=None, path=None, children=()):
+    kids = [Stream('__properties_version1.0', props([(0x37050003, method)], 8)), Stream('__substg1.0_3707001F', name.encode('utf-16-le'))]
+    if mime:
+        kids.append(Stream('__substg1.0_370E001F', mime.encode('utf-16-le')))
+    if data is not None:
+        kids.append(Stream('__substg1.0_37010102', data))
+    if path:
+        kids.append(Stream('__substg1.0_370D001F', path.encode('utf-16-le')))
+    kids += list(children)
+    return Storage('__attach_version1.0_#%08X' % n, kids)
+
+
+def msg(attachments, clsid='00020D0B-0000-0000-C000-000000000046'):
+    return cfb([Stream('__properties_version1.0', props([], 32)), Stream('__substg1.0_0037001F', 'Inert subject'.encode('utf-16-le')), Storage('__nameid_version1.0', [])] + list(attachments), root_clsid=clsid)
+
+
+# ---------- encryption, with fixed salts and keys so a rebuild writes the same bytes ----------
+#
+# Python has no AES in its standard library, so aes_encrypt() is FIPS-197 written out. It only encrypts, which is all a
+# fixture needs. RC4 is short enough to write here too.
+
+SBOX = []
+
+
+def _sbox():
+    p = q = 1
+    box = [0] * 256
+    while True:
+        p = p ^ ((p << 1) & 0xFF) ^ (0x1B if p & 0x80 else 0)
+        q ^= q << 1
+        q ^= q << 2
+        q ^= q << 4
+        q &= 0xFF
+        if q & 0x80:
+            q ^= 0x09
+        x = q ^ ((q << 1) | (q >> 7)) & 0xFF ^ ((q << 2) | (q >> 6)) & 0xFF ^ ((q << 3) | (q >> 5)) & 0xFF ^ ((q << 4) | (q >> 4)) & 0xFF
+        box[p] = (x ^ 0x63) & 0xFF
+        if p == 1:
+            break
+    box[0] = 0x63
+    return box
+
+
+SBOX = _sbox()
+
+
+def _xtime(a):
+    return ((a << 1) ^ 0x1B) & 0xFF if a & 0x80 else a << 1
+
+
+def _expand(key):
+    nk = len(key) // 4
+    rounds = nk + 6
+    w = [list(key[4 * i:4 * i + 4]) for i in range(nk)]
+    rcon = 1
+    for i in range(nk, 4 * (rounds + 1)):
+        t = list(w[i - 1])
+        if i % nk == 0:
+            t = [SBOX[b] for b in t[1:] + t[:1]]
+            t[0] ^= rcon
+            rcon = _xtime(rcon)
+        elif nk > 6 and i % nk == 4:
+            t = [SBOX[b] for b in t]
+        w.append([a ^ b for a, b in zip(w[i - nk], t)])
+    return [sum(w[4 * r:4 * r + 4], []) for r in range(rounds + 1)]
+
+
+def _encrypt_block(keys, block):
+    s = [a ^ b for a, b in zip(block, keys[0])]
+    for r in range(1, len(keys)):
+        s = [SBOX[b] for b in s]
+        s = [s[(i + 4 * (i % 4)) % 16] for i in range(16)]
+        if r < len(keys) - 1:
+            m = []
+            for c in range(4):
+                a = s[4 * c:4 * c + 4]
+                t = a[0] ^ a[1] ^ a[2] ^ a[3]
+                m += [a[i] ^ t ^ _xtime(a[i] ^ a[(i + 1) % 4]) for i in range(4)]
+            s = m
+        s = [a ^ b for a, b in zip(s, keys[r])]
+    return bytes(s)
+
+
+def aes_encrypt(key, data, iv=None):
+    """AES-ECB, or AES-CBC from `iv`, over data that is a whole number of blocks."""
+    keys = _expand(key)
+    out, prev = bytearray(), iv
+    for i in range(0, len(data), 16):
+        block = data[i:i + 16]
+        if iv is not None:
+            block = bytes(a ^ b for a, b in zip(block, prev))
+        prev = _encrypt_block(keys, block)
+        out += prev
+    return bytes(out)
+
+
+def rc4(key, data):
+    s = list(range(256))
+    j = 0
+    for i in range(256):
+        j = (j + s[i] + key[i % len(key)]) & 255
+        s[i], s[j] = s[j], s[i]
+    out, i, j = bytearray(), 0, 0
+    for b in data:
+        i = (i + 1) & 255
+        j = (j + s[i]) & 255
+        s[i], s[j] = s[j], s[i]
+        out.append(b ^ s[(s[i] + s[j]) & 255])
+    return bytes(out)
+
+
+def pad16(b, fill=0):
+    return b + bytes([fill]) * (-len(b) % 16)
+
+
+def agile_encrypt(package, password, spin=100000, hash_name='sha512', cipher='AES', salt_size=True):
+    """An encrypted OOXML package (MS-OFFCRYPTO 2.3.4.10): AES-256-CBC and SHA-512 by default, with fixed salts and keys.
+    A hash shorter than the key, such as SHA-1's, is padded with 0x36 to make it."""
+    key_salt, data_salt, secret, verifier = bytes(range(16)), bytes(range(16, 32)), bytes(range(32, 64)), bytes(range(64, 80))
+    H = lambda data: hashlib.new(hash_name, data).digest()
+    h = H(key_salt + password.encode('utf-16-le'))
+    for i in range(spin):
+        h = H(struct.pack('<I', i) + h)
+
+    def derive(block):
+        return (H(h + block) + b'\x36' * 32)[:32]
+    enc_input = aes_encrypt(derive(bytes.fromhex('fea7d2763b4b9e79')), verifier, key_salt)
+    enc_value = aes_encrypt(derive(bytes.fromhex('d7aa0f6d3061344e')), pad16(H(verifier)), key_salt)
+    enc_key = aes_encrypt(derive(bytes.fromhex('146e0be7abacd0d6')), secret, key_salt)
+    body = bytearray(struct.pack('<Q', len(package)))
+    for k in range(0, len(package), 4096):
+        iv = H(data_salt + struct.pack('<I', k // 4096))[:16]
+        body += aes_encrypt(secret, pad16(package[k:k + 4096]), iv)
+    # The integrity check Office writes: an HMAC key, and the HMAC of the encrypted package, each encrypted.
+    hmac_key = bytes(range(128, 192))[:len(H(b''))]
+    hmac_value = hmac.new(hmac_key, bytes(body), hash_name).digest()
+    enc_hmac_key = aes_encrypt(secret, pad16(hmac_key), H(data_salt + bytes.fromhex('5fb2ad010cb9e1f6'))[:16])
+    enc_hmac_value = aes_encrypt(secret, pad16(hmac_value), H(data_salt + bytes.fromhex('a0677f02b22c8433'))[:16])
+    b = lambda x: base64.b64encode(x).decode()
+    name, size = {'sha512': ('SHA512', 64), 'sha1': ('SHA1', 20)}[hash_name]
+    salt_attr = 'saltSize="16" ' if salt_size else ''
+    xml = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n<encryption xmlns="http://schemas.microsoft.com/office/2006/encryption" '
+           'xmlns:p="http://schemas.microsoft.com/office/2006/keyEncryptor/password"><keyData saltSize="16" blockSize="16" keyBits="256" hashSize="%d" '
+           'cipherAlgorithm="%s" cipherChaining="ChainingModeCBC" hashAlgorithm="%s" saltValue="%s"/><dataIntegrity encryptedHmacKey="%s" encryptedHmacValue="%s"/><keyEncryptors><keyEncryptor '
+           'uri="http://schemas.microsoft.com/office/2006/keyEncryptor/password"><p:encryptedKey spinCount="%d" %sblockSize="16" keyBits="256" '
+           'hashSize="%d" cipherAlgorithm="%s" cipherChaining="ChainingModeCBC" hashAlgorithm="%s" saltValue="%s" encryptedVerifierHashInput="%s" '
+           'encryptedVerifierHashValue="%s" encryptedKeyValue="%s"/></keyEncryptor></keyEncryptors></encryption>') % (
+        size, cipher, name, b(data_salt), b(enc_hmac_key), b(enc_hmac_value), spin, salt_attr, size, cipher, name, b(key_salt), b(enc_input), b(enc_value), b(enc_key))
+    info = struct.pack('<HHI', 4, 4, 0x40) + xml.encode()
+    return info, bytes(body)
+
+
+def standard_encrypt(package, password, bits=128, alg=None):
+    """An encrypted OOXML package (MS-OFFCRYPTO 2.3.4.5): AES-ECB and SHA-1 over 50,000 rounds, with a fixed salt."""
+    salt, verifier = bytes(range(100, 116)), bytes(range(116, 132))
+    h = hashlib.sha1(salt + password.encode('utf-16-le')).digest()
+    for i in range(50000):
+        h = hashlib.sha1(struct.pack('<I', i) + h).digest()
+    final = hashlib.sha1(h + struct.pack('<I', 0)).digest()
+    x = lambda fill: hashlib.sha1(bytes(a ^ b for a, b in zip(bytes([fill]) * 64, final + bytes(44)))).digest()
+    key = (x(0x36) + x(0x5C))[:bits // 8]
+    alg = alg or {128: 0x660E, 192: 0x660F, 256: 0x6610}[bits]
+    csp = 'Microsoft Enhanced RSA and AES Cryptographic Provider\0'.encode('utf-16-le')
+    header = struct.pack('<IIIIIIII', 0x24, 0, alg, 0x8004, bits, 0x18, 0, 0) + csp
+    info = struct.pack('<HHI', 4, 2, 0x24) + struct.pack('<I', len(header)) + header + struct.pack('<I', 16) + salt + aes_encrypt(key, verifier) + struct.pack('<I', 20) + aes_encrypt(key, pad16(hashlib.sha1(verifier).digest()))
+    return info, struct.pack('<Q', len(package)) + aes_encrypt(key, pad16(package))
+
+
+def encrypted_package(package, password, kind='agile', stub=False, **options):
+    info, body = agile_encrypt(package, password, **options) if kind == 'agile' else standard_encrypt(package, password, **options)
+    spaces = Storage('\x06DataSpaces', [Stream('Version', b'\x3c\x00\x00\x00' + 'Microsoft.Container.DataSpaces'.encode('utf-16-le') + struct.pack('<HHHHHH', 1, 0, 1, 0, 1, 0))])
+    extra = [Stream('WordDocument', bytes(4096))] if stub else []
+    return cfb([Stream('EncryptionInfo', info), Stream('EncryptedPackage', body), spaces] + extra)
+
+
+def biff_encrypt(stream, password, method='rc4', bits=128, alg=0x6801):
+    """A BIFF8 workbook stream with a FILEPASS record after its BOF and every later record encrypted (MS-XLS 2.2.10):
+    RC4 keyed per 1,024-byte block of the stream, record headers left plain, and lbPlyPos of BoundSheet8 too."""
+    salt, verifier = bytes(range(200, 216)), bytes(range(216, 232))
+    if method == 'rc4':
+        h0 = hashlib.md5(password.encode('utf-16-le')).digest()[:5]
+        h1 = hashlib.md5((h0 + salt) * 16).digest()[:5]
+        key = lambda block: hashlib.md5(h1 + struct.pack('<I', block)).digest()
+        enc = rc4(key(0), verifier + hashlib.md5(verifier).digest())
+        filepass = struct.pack('<HHH', 1, 1, 1) + salt + enc
+    else:
+        h0 = hashlib.sha1(salt + password.encode('utf-16-le')).digest()
+        size = bits or 40
+        key = lambda block: hashlib.sha1(h0 + struct.pack('<I', block)).digest()[:5] + bytes(11) if size == 40 else hashlib.sha1(h0 + struct.pack('<I', block)).digest()[:size // 8]
+        enc = rc4(key(0), verifier + hashlib.sha1(verifier).digest())
+        csp = 'Microsoft Enhanced Cryptographic Provider v1.0\0'.encode('utf-16-le')
+        header = struct.pack('<IIIIIIII', 0x04, 0, alg, 0x8004, bits, 1, 0, 0) + csp
+        filepass = struct.pack('<HHH', 1, 4, 2) + struct.pack('<I', 0x04) + struct.pack('<I', len(header)) + header + struct.pack('<I', 16) + salt + enc[:16] + struct.pack('<I', 20) + enc[16:]
+    first = struct.unpack_from('<H', stream, 2)[0] + 4
+    fp = rec(0x002F, filepass)
+    plain = bytearray(stream[:first] + fp + stream[first:])
+    # BoundSheet8 positions move by the FILEPASS record.
+    p = first + len(fp)
+    while p + 4 <= len(plain):
+        t, n = struct.unpack_from('<HH', plain, p)
+        if t == 0x0085:
+            struct.pack_into('<I', plain, p + 4, struct.unpack_from('<I', plain, p + 4)[0] + len(fp))
+        if t == 0x000A:
+            break
+        p += 4 + n
+    out = bytearray(plain)
+    p = first + len(fp)
+    blocks = {}
+
+    def ks(at):
+        b = at // 1024
+        if b not in blocks:
+            blocks[b] = rc4(key(b), bytes(1024))
+        return blocks[b][at % 1024]
+    while p + 4 <= len(plain):
+        t, n = struct.unpack_from('<HH', plain, p)
+        if t not in (0x0809, 0x002F, 0x0194, 0x0195, 0x00E1, 0x0196, 0x0138):
+            for k in range(4 if t == 0x0085 else 0, n):
+                out[p + 4 + k] ^= ks(p + 4 + k)
+        p += 4 + n
+    return bytes(out)
+
+
+# ---------- binary Office files and RTF, written byte by byte ----------
+#
+# Each file holds what one rule reads: a field, a link, an object, a macro storage. Payloads are inert markers and
+# addresses use reserved names. None of these files comes from anywhere but this code.
+
+INERT_URL = 'https://example.invalid/inert.hta'
+
+
+def zip_package(kind='xlsx'):
+    """A small OOXML package to encrypt."""
+    if kind == 'docx':
+        return zip_bytes(docx('<w:p><w:r><w:t>inert</w:t></w:r></w:p>'))
+    return zip_bytes(xlsx())
+
+
+def object_pool(objects):
+    return Storage('ObjectPool', [Storage('_%d' % (1000 + i), kids, clsid) for i, (kids, clsid) in enumerate(objects)])
+
+
+def ole_files():
+    """The binary Office formats, each feature in a file of its own."""
+    files = {}
+    plain = 'Inert text.\r'
+    files['word.doc'] = word_doc(plain)
+    files['word-8bit.doc'] = word_doc(plain, compressed=True)
+    files['template.dot'] = word_doc(plain, dot=True)
+    files['word-password.doc'] = word_doc(plain, encrypted=True)
+    files['word6.doc'] = word6_doc(plain)
+    files['word6-macros.dot'] = word6_doc(plain, macros=64, dot=True)
+    files['word6-dde.doc'] = word6_doc('\x13 DDEAUTO inert-app "inert topic" \x14x\x15\r')
+    fields = ('\x13 DDEAUTO inert-app "inert topic" \x14r\x15'
+              '\x13 INCLUDEPICTURE "https://example.invalid/inert.png" \\d \x14\x15'
+              '\x13 INCLUDETEXT "C:\\\\inert\\\\local.doc" \x14\x15'
+              '\x13 HYPERLINK "https://example.invalid/page" \x14link\x15'
+              '\x13 MACROBUTTON InertMacro click \x14\x15'
+              '\x13 \x13 QUOTE "DDEAUTO" \x14DDEAUTO\x15 inert-app topic \x14\x15'
+              '\x13 PAGE \x14 1\x15\r')
+    files['fields.doc'] = word_doc(fields, template='\\\\inert.example.invalid\\share\\inert.dot')
+    files['fields-8bit.doc'] = word_doc(fields, compressed=True)
+    files['local-template.doc'] = word_doc(plain, template='C:\\Templates\\Inert.dot')
+    files['vba.doc'] = word_doc(plain, extra=[Storage('Macros', VBA_PROJECT)])
+    files['objects.doc'] = word_doc(plain, extra=[object_pool([
+        (ole_object([Stream('\x01Ole10Native', struct.pack('<I', 0) + package_native('inert.txt', 'C:\\inert\\inert.txt', 'C:\\Temp\\inert.txt', b'inert marker'))], user_type='Package', prog_id='Package'), '0003000C-0000-0000-C000-000000000046'),
+        (ole_object([Stream('Equation Native', b'inert marker')], user_type='Microsoft Equation 3.0', prog_id='Equation.3'), EQUATION_CLSID),
+        ([Stream('\x01CompObj', comp_obj('Inert Control', 'Inert.Control.1')), Stream('\x03OCXNAME', 'InertControl1'.encode('utf-16-le') + b'\0\0'), Stream('contents', b'inert marker')], 'D27CDB6E-AE6D-11CF-96B8-444553540000'),
+        (ole_object([], user_type='Inert Link', prog_id='Inert.Link', link=url_moniker(INERT_URL)), None),
+        (ole_object([], user_type='Inert Link', prog_id='Inert.Link', link=file_moniker('C:\\inert\\linked.xls')), None),
+    ])])
+    files['excel.xls'] = xls([('Sheet1', 0, 0x10)])
+    files['excel5.xls'] = xls([('Sheet1', 0, 0x10)], book=True, biff8=False)
+    files['both-streams.xls'] = cfb([Stream('Workbook', workbook([('Sheet1', 0, 0x10)])), Stream('Book', workbook([('Macro1', 1, 0x40)], biff8=False))])
+    files['template.xlt'] = xls([('Sheet1', 0, 0x10)], globals_extra=rec(0x0060))
+    files['addin.xla'] = xls([('Sheet1', 0, 0x10)], globals_extra=rec(0x0087))
+    files['xlm.xls'] = xls([('Sheet1', 0, 0x10), ('Macro1', 1, 0x40)], globals_extra=lbl('', builtin=1) + lbl('auto_close_inert'))
+    files['xlm-bof.xls'] = xls([('Sheet1', 0, 0x10), ('Macro1', 0, 0x40)])
+    files['workbook-vba.xls'] = xls([('Sheet1', 0, 0x10)], extra=[Storage('_VBA_PROJECT_CUR', VBA_PROJECT)])
+    files['vba-incomplete.xls'] = xls([('Sheet1', 0, 0x10)], extra=[Storage('_VBA_PROJECT_CUR', [Stream('PROJECT', b'inert marker')])])
+    files['links.xls'] = xls([('Sheet1', 0, 0x10)], globals_extra=(
+        supbook(0, 'inert-app\x03inert topic') + extern_name('A1', 0x7FE2) + extern_name('StdDocumentName', 0x7FEA)
+        + supbook(0, 'Inert.Class\x03C:\\inert\\object.bin') + extern_name('StdDocumentName', 0x7FEA)
+        + supbook(1, '\x01\x05\x1ehttps://example.invalid/books\x03inert.xls') + supbook(1, '\x01\x01C\x03inert\x03local.xls') + supbook(1, 'relative.xls')
+        + rec(0x01AE, struct.pack('<HH', 1, 0x0401)) + supbook(1, ' ')),
+        sheet_extra={'Sheet1': obj_macro() + hlink(target='https://example.invalid/page') + hlink(file_path='C:\\inert\\file.txt')})
+    files['objects.xls'] = xls([('Sheet1', 0, 0x10)], extra=[Storage('MBD0000ABCD', ole_object([], user_type='Inert Object', prog_id='Inert.Object')), Stream('Ctls', b'inert marker')])
+    # InterfaceHdr is one of the records encryption leaves plain.
+    files['rc4.xls'] = cfb([Stream('Workbook', biff_encrypt(workbook([('Sheet1', 0, 0x10), ('Macro1', 1, 0x40)], globals_extra=rec(0x00E1, b'\xb0\x04') + lbl('', builtin=1)), 'VelvetSweatshop'))])
+    files['cryptoapi.xls'] = cfb([Stream('Workbook', biff_encrypt(workbook([('Sheet1', 0, 0x10)], globals_extra=supbook(0, 'inert-app\x03inert topic') + extern_name('A1', 0x7FE2)), 'VelvetSweatshop', 'cryptoapi'))])
+    files['rc4-password.xls'] = cfb([Stream('Workbook', biff_encrypt(workbook([('Sheet1', 0, 0x10)]), 'inert-password'))])
+    files['xor.xls'] = cfb([Stream('Workbook', workbook([('Sheet1', 0, 0x10)]).replace(rec(0x000A), rec(0x002F, struct.pack('<HHH', 0, 0x1234, 0x5678)) + rec(0x000A), 1))])
+    # PowerPoint: an embedded object stored compressed, a VBA project, a control and actions.
+    obj = cfb(ole_object([Stream('Equation Native', b'inert marker')], user_type='Microsoft Equation 3.0', prog_id='Equation.3'), root_clsid=EQUATION_CLSID)
+    vba = cfb(VBA_PROJECT)
+    ctl = cfb([Stream('\x01CompObj', comp_obj('Inert Control', 'Inert.Control.1')), Stream('contents', b'inert marker')], root_clsid='D27CDB6E-AE6D-11CF-96B8-444553540000')
+    ex_list = prec(0x0409, prec(0x040A, struct.pack('<I', 4))
+                   + prec(0x0FCC, prec(0x0FC3, struct.pack('<IIIIII', 1, 0, 1, 0, 3, 0)), container=True)
+                   + prec(0x0FEE, prec(0x0FC3, struct.pack('<IIIIII', 1, 2, 2, 0, 5, 0)), container=True)
+                   + prec(0x0FD7, prec(0x0FD3, struct.pack('<I', 3)) + cstring('Inert', 0) + cstring('https://example.invalid/slide', 1), container=True)
+                   + prec(0x1007, prec(0x1005, prec(0x1004, bytes(8)) + cstring('C:\\inert\\movie.avi', 0), container=True), container=True), container=True)
+    vba_info = prec(0x03FF, prec(0x0400, struct.pack('<III', 4, 1, 2)), container=True)
+    actions = prec(0xF00D, prec(0x0FF2, prec(0x0FF3, struct.pack('<IIBBBBB3x', 0, 0, 2, 0, 0, 0, 0)) + cstring('C:\\Windows\\inert.exe', 2), container=True)
+                   + prec(0x0FF2, prec(0x0FF3, struct.pack('<IIBBBBB3x', 0, 0, 1, 0, 0, 0, 0)) + cstring('InertMacro', 2), instance=1, container=True)
+                   + prec(0x0FF2, prec(0x0FF3, struct.pack('<IIBBBBB3x', 0, 0, 5, 1, 0, 0, 0)), container=True), container=True)
+    files['powerpoint.ppt'] = ppt()
+    files['objects.ppt'] = ppt(objects=[(3, ex_ole_stg(obj, True)), (4, ex_ole_stg(vba, False)), (5, ex_ole_stg(ctl, True))], document=ex_list + vba_info, slides=actions)
+    files['broken-object.ppt'] = ppt(objects=[(3, prec(0x1011, struct.pack('<I', 100) + b'not zlib data', instance=1)), (4, ex_ole_stg(b'not a compound file', False))], document=prec(0x0409, prec(0x0FCC, prec(0x0FC3, struct.pack('<IIIIII', 1, 0, 1, 0, 3, 0)), container=True), container=True))
+    files['presentation-password.ppt'] = ppt(encrypted=True)
+    files['visio.vsd'] = cfb([Stream('VisioDocument', b'Visio (TM) Drawing\r\n' + bytes(100)), Stream('\x05SummaryInformation', bytes(48))], root_clsid='00021A14-0000-0000-C000-000000000046')
+    files['message.msg'] = msg([
+        attachment(0, 1, 'inert.txt', 'text/plain', data=b'inert marker'),
+        attachment(1, 2, 'linked.txt', path='\\\\inert.example.invalid\\share\\linked.txt'),
+        attachment(2, 7, 'web.txt', path='https://example.invalid/web.txt'),
+        attachment(3, 5, 'Forwarded', children=[Storage('__substg1.0_3701000D', [Stream('__properties_version1.0', props([], 24)), attachment(0, 1, 'nested.txt', 'text/plain', data=b'inert marker')])]),
+        attachment(4, 6, 'object', children=[Storage('__substg1.0_3701000D', ole_object([], user_type='Inert Object', prog_id='Inert.Object'))]),
+    ])
+    files['template.oft'] = msg([], clsid='0006F046-0000-0000-C000-000000000046')
+    files['publisher.pub'] = cfb([Storage('Quill', [Storage('QuillSub', [Stream('CONTENTS', bytes(64))])]), Stream('Contents', bytes(64))], root_clsid='00021201-0000-0000-00C0-000000000046')
+    files['publisher95.pub'] = cfb([Stream('Contents', bytes(64)), Storage('Objects', [])], root_clsid='00021201-0000-0000-00C0-000000000046')
+    files['project.mpp'] = cfb([Storage('   19', [Stream('Props', bytes(64))]), Stream('Props9', bytes(64)), Storage('_VBA_PROJECT_CUR', VBA_PROJECT)], root_clsid='74B78F3A-C8C8-11D1-BE11-00C04FB6FAF1')
+    files['two-formats.doc'] = cfb([Stream('WordDocument', word_doc_stream(plain)), Stream('Workbook', workbook([('Sheet1', 0, 0x10)]))])
+    files['bare-object.bin'] = cfb(ole_object([Stream('\x01Ole10Native', struct.pack('<I', 0) + package_native('inert.txt', 'inert.txt', 'inert.txt', b'inert'))], user_type='Package', prog_id='Package'))
+    files['agile.xlsx'] = encrypted_package(zip_package('xlsx'), 'VelvetSweatshop')
+    files['standard.docx'] = encrypted_package(zip_package('docx'), 'VelvetSweatshop', kind='standard', stub=True)
+    files['password.docx'] = encrypted_package(zip_package('docx'), 'inert-password')
+    files['extensible.docx'] = cfb([Stream('EncryptionInfo', struct.pack('<HHI', 4, 3, 0)), Stream('EncryptedPackage', bytes(64))])
+    files.update(variant_files())
+    # A compound file with a ZIP archive after it, which both readers read, and the first sector of one, which only
+    # the ZIP reader reads.
+    files['zip-polyglot.doc'] = assemble(docx_entries(), prefix=word_doc(plain))
+    files['broken-cfb-zip.docx'] = assemble(docx_entries(), prefix=word_doc(plain)[:512])
+    return files
+
+
+def variant_files():
+    """Files that take the less common branches of each format: a field, a property or a record missing or cut short."""
+    files = {}
+    plain = 'Inert text.\r'
+    # Word: a WordDocument stream too short for a FIB or holding none, the 0Table stream, a piece table with
+    # formatting before it, an empty piece and a cut, and template tables of one string, 8-bit strings, or cut short.
+    files['short-fib.doc'] = cfb([Stream('WordDocument', bytes(20))])
+    files['not-fib.doc'] = cfb([Stream('WordDocument', bytes(1000))])
+    files['fib-cut.doc'] = cfb([Stream('WordDocument', struct.pack('<HH', 0xA5EC, 0xC1) + bytes(28) + struct.pack('<H', 0x7FFF) + bytes(30))])
+    files['0table.doc'] = word_doc('\x13 DDEAUTO a b \x14\x15\r', table='0Table')
+    dde = '\x13 DDEAUTO a b \x14\x15\r'
+    pieces = (b'\x01' + struct.pack('<H', 3) + b'abc' + b'\x02' + struct.pack('<I', 3 * 4 + 2 * 8) + struct.pack('<III', 0, 0, len(dde))
+              + struct.pack('<HIH', 0, 1024, 0) + struct.pack('<HIH', 0, 1024, 0))
+    files['clx-variants.doc'] = word_doc(dde, clx=pieces)
+    files['clx-other.doc'] = word_doc(plain, clx=b'\x05inert')
+    files['clx-cut.doc'] = word_doc(plain, clx=b'\x02' + struct.pack('<I', 200) + bytes(10))
+    files['assoc-one.doc'] = word_doc(plain, assoc=sttb_unicode(['C:\\Templates\\Only.dot']))
+    files['assoc-8bit.doc'] = word_doc(plain, assoc=struct.pack('<HH', 2, 0) + b'\x00' + b'\x11C:\\Templates\\8bit')
+    files['assoc-cut.doc'] = word_doc(plain, assoc=struct.pack('<HHH', 0xFFFF, 3, 0) + struct.pack('<H', 50) + b'ab')
+    # ObjectPool storages: one with no object streams, one with a CompObj past 64 KiB and an empty OLE stream, a
+    # Packager link, a control without a name, a link without a moniker and a Packager link without a source.
+    link_no_moniker = struct.pack('<IIIIIII', 0x02000001, 1, 1, 0, 0, 0, 0)
+    package_link = lambda source: struct.pack('<I', 0) + struct.pack('<H', 2) + b'linked.txt\0' + source.encode('latin-1') + b'\0' + bytes(8) + b'temp.txt\0'
+    files['objects-variants.doc'] = word_doc(plain, extra=[object_pool([
+        ([Stream('contents', b'inert marker')], None),
+        ([Stream('\x01CompObj', bytes(70000)), Stream('\x01Ole', b'')], None),
+        ([Stream('\x01Ole10Native', package_link('C:\\inert\\linked.txt'))], None),
+        ([Stream('\x03OCXDATA', b'inert marker')], None),
+        ([Stream('\x01Ole', link_no_moniker)], '00000300-0000-0000-C000-000000000046'),
+        ([Stream('\x01Ole10Native', package_link(''))], None),
+    ])])
+    # Excel: a stream that starts with no BOF, an OLE link without a file, a sheet whose BoundSheet points at no BOF, a
+    # chart inside a sheet, Obj records without a macro, and a record cut short.
+    files['no-bof.xls'] = cfb([Stream('Workbook', rec(0x000A))])
+    sheet = (bof(0x10) + bof(0x20) + rec(0x005D, struct.pack('<HH', 0x15, 2) + b'ab' + struct.pack('<HH', 0, 0)) + rec(0x000A)
+             + rec(0x005D, struct.pack('<HH', 0x15, 2) + b'ab' + struct.pack('<HH', 0x13, 0)) + rec(0x005D, struct.pack('<HH', 0x15, 2) + b'ab') + rec(0x000A))
+    head = bof(5) + supbook(0, 'Inert.Class') + extern_name('StdDocumentName', 0x7FEA)
+    bound = lambda pos, name: rec(0x0085, struct.pack('<IBB', pos, 0, 0) + short_xl(name))
+    at = len(head) + len(bound(0, 'Sheet1')) + len(bound(0, 'Lost')) + len(rec(0x000A))
+    # The second sheet starts four bytes into the BOF record, where no record header is; a record cut short ends the stream.
+    files['xls-variants.xls'] = cfb([Stream('Workbook', head + bound(at, 'Sheet1') + bound(4, 'Lost') + rec(0x000A) + sheet + struct.pack('<HH', 0x0204, 100) + b'cut')])
+    # Encryption: CryptoAPI with a 40-bit key given as 0 and as 40, with 56 bits, with AES named, a FILEPASS of
+    # another version and one cut short; EncryptionInfo cut short, a package cut short or shorter than it says,
+    # Standard with RC4 named or cut short, and Agile without a password key, with another cipher, a spin count past
+    # the limit, SHA-1 and no salt size, and a package with data after its archive.
+    book = workbook([('Sheet1', 0, 0x10)])
+    files['cryptoapi-40.xls'] = cfb([Stream('Workbook', biff_encrypt(book, 'VelvetSweatshop', 'cryptoapi', bits=0))])
+    files['cryptoapi-56.xls'] = cfb([Stream('Workbook', biff_encrypt(book, 'VelvetSweatshop', 'cryptoapi', bits=56))])
+    files['cryptoapi-aes.xls'] = cfb([Stream('Workbook', biff_encrypt(book, 'VelvetSweatshop', 'cryptoapi', alg=0x660E))])
+    files['filepass-version.xls'] = cfb([Stream('Workbook', book.replace(rec(0x000A), rec(0x002F, struct.pack('<HHH', 1, 9, 9)) + rec(0x000A), 1))])
+    files['filepass-cut.xls'] = cfb([Stream('Workbook', book.replace(rec(0x000A), rec(0x002F, struct.pack('<HHH', 1, 1, 1) + bytes(10)) + rec(0x000A), 1))])
+    package = zip_package('docx')
+    encrypted = lambda info, body: cfb([Stream('EncryptionInfo', info), Stream('EncryptedPackage', body)])
+    info, body = standard_encrypt(package, 'VelvetSweatshop')
+    files['info-cut.docx'] = encrypted(b'\x04\x00', body)
+    files['package-cut.docx'] = encrypted(info, b'abc')
+    files['package-short.docx'] = encrypted(info, struct.pack('<Q', 1 << 40) + body[8:])
+    files['standard-rc4.docx'] = encrypted(standard_encrypt(package, 'VelvetSweatshop', alg=0x6801)[0], body)
+    files['standard-cut.docx'] = encrypted(info[:40], body)
+    agile_info, agile_body = agile_encrypt(package, 'VelvetSweatshop', spin=1000)
+    files['agile-no-key.docx'] = encrypted(agile_info.replace(b'p:encryptedKey', b'p:otherKey'), agile_body)
+    files['agile-cipher.docx'] = encrypted(agile_encrypt(package, 'VelvetSweatshop', spin=1000, cipher='DES')[0], agile_body)
+    files['agile-spin.docx'] = encrypted(agile_info.replace(b'spinCount="1000"', b'spinCount="10000001"'), agile_body)
+    # Hashes OpenSSL's default provider lacks, or that are no hash at all, never reach OpenSSL.
+    files['agile-ripemd.docx'] = encrypted(agile_info.replace(b'hashAlgorithm="SHA512"', b'hashAlgorithm="RIPEMD160"'), agile_body)
+    files['agile-constructor.docx'] = encrypted(agile_info.replace(b'hashAlgorithm="SHA512"', b'hashAlgorithm="constructor"'), agile_body)
+    files['agile-no-bits.docx'] = encrypted(agile_info.replace(b'keyBits="256" ', b'', 1), agile_body)
+    # Without the key data's salt the segments' IVs come out wrong, and so does the archive.
+    files['agile-no-salt.docx'] = encrypted(re.sub(rb'(<keyData[^>]*?) saltValue="[^"]*"', rb'\1', agile_info), agile_body)
+    files['standard-sha256.docx'] = encrypted(info.replace(struct.pack('<III', 0x660E, 0x8004, 128), struct.pack('<III', 0x660E, 0x800C, 128)), body)
+    files['standard-bits.docx'] = encrypted(standard_encrypt(package, 'VelvetSweatshop', bits=128)[0].replace(struct.pack('<III', 0x660E, 0x8004, 128), struct.pack('<III', 0x660E, 0x8004, 64)), body)
+    files['agile-sha1.docx'] = encrypted_package(package, 'VelvetSweatshop', hash_name='sha1', salt_size=False, spin=1000)
+    files['agile-trailing.docx'] = encrypted_package(package + b'inert trailing data', 'VelvetSweatshop', spin=1000)
+    # PowerPoint: a current edit that is no UserEditAtom, persist entries past the stream, at a record already read
+    # and at the tail of an atom that reads as a container, a record running past the stream, objects whose data is
+    # cut short or declares more than the limit, a control without a class id, a VBA project and a control whose
+    # storages do not read, and actions, hyperlinks and media without their strings.
+    ex = prec(0x0409, prec(0x0FCC, prec(0x0FC3, struct.pack('<IIIIII', 1, 2, 1, 0, 6, 0)), container=True)
+              + prec(0x0FD7, prec(0x0FD3, struct.pack('<I', 3)), container=True) + prec(0x1007, prec(0x1005, prec(0x1004, bytes(8)), container=True), container=True)
+              + prec(0x0FEE, prec(0x0FC3, struct.pack('<IIIIII', 1, 2, 2, 0, 7, 0)), container=True), container=True)
+    vba_info = prec(0x03FF, prec(0x0400, struct.pack('<III', 8, 1, 2)), container=True)
+    zero_ctl = cfb([Stream('contents', b'inert marker')])
+    # The last 8 bytes of this atom read as a container header whose body is the ExObjList record after it.
+    fake = prec(0x0FFE, bytes(32) + struct.pack('<HHI', 0x0F, 0x0FFF, len(ex)))
+    # DocumentContainer header, DocumentAtom, then the 32 bytes before the fake header.
+    fake_at = 8 + 48 + 8 + 32
+    files['ppt-variants.ppt'] = ppt(objects=[(3, prec(0x1011, b'ab', instance=1)), (6, ex_ole_stg(zero_ctl, False)), (7, ex_ole_stg(b'not a compound file', False)), (8, prec(0x1011, b'xx', instance=1))],
+                                    document=fake + ex + vba_info, slides=prec(0x0FF2, cstring('lonely', 2), container=True),
+                                    extra_persist=lambda offsets: {9: 1 << 30, 10: offsets[2], 11: fake_at})
+    files['huge-object.ppt'] = ppt(objects=[(3, prec(0x1011, struct.pack('<I', 0x7FFFFFFF) + zlib.compress(b'x'), instance=1))])
+    files['bad-edit.ppt'] = cfb([Stream('PowerPoint Document', prec(0x03E8, b'', container=True) + prec(0x1234, bytes(40))),
+                                 Stream('Current User', prec(0x0FF6, struct.pack('<IIIHHBBH', 0x14, 0xE391C05F, 8, 0, 0x03F4, 3, 0, 0)))])
+    files['record-past-end.ppt'] = cfb([Stream('PowerPoint Document', prec(0x03E8, b'', container=True) + struct.pack('<HHI', 0, 0x1234, 1000) + b'short')])
+    # Outlook: names from the short filename and the display name in 8-bit text, an attachment with no properties, a
+    # reference with only the short path, references with no path, and an attachment by value with no data.
+    kid = lambda name, data: Stream(name, data)
+    files['msg-variants.msg'] = msg([
+        Storage('__attach_version1.0_#00000000', [kid('__properties_version1.0', props([(0x37050003, 1)], 8)), kid('__substg1.0_3704001E', b'short.txt'), kid('__substg1.0_37010102', b'inert')]),
+        Storage('__attach_version1.0_#00000001', [kid('__substg1.0_3001001F', 'Display'.encode('utf-16-le')), kid('__substg1.0_37010102', b'inert')]),
+        Storage('__attach_version1.0_#00000002', [kid('__properties_version1.0', props([(0x37050003, 3)], 8)), kid('__substg1.0_3708001F', 'C:\\inert\\ref.txt'.encode('utf-16-le'))]),
+        Storage('__attach_version1.0_#00000003', [kid('__properties_version1.0', props([(0x37050003, 2)], 8))]),
+        Storage('__attach_version1.0_#00000004', [kid('__properties_version1.0', props([(0x37050003, 7)], 8))]),
+        Storage('__attach_version1.0_#00000005', [kid('__properties_version1.0', props([(0x37050003, 1)], 8)), kid('__substg1.0_3707001F', 'nodata.txt'.encode('utf-16-le'))]),
+        Storage('__attach_version1.0_#00000006', [kid('__properties_version1.0', bytes(70000)), kid('__substg1.0_37010102', b'inert')]),
+        Storage('__attach_version1.0_#00000007', [kid('__properties_version1.0', props([(0x37050003, 7)], 8)), kid('__substg1.0_370D001F', 'https://example.invalid/w'.encode('utf-16-le'))]),
+    ])
+    return files
+
+
+def word_doc_stream(text):
+    """The WordDocument stream of word_doc(), for files that need it beside other streams."""
+    return fib97(len(text), {}, 0x0200).ljust(1024, b'\0') + text.encode('utf-16-le')
+
+
+def hexify(b, width=64):
+    h = b.hex()
+    return '\r\n'.join(h[i:i + width] for i in range(0, len(h), width))
+
+
+def rtf(body):
+    return ('{\\rtf1\\ansi\\ansicpg1252\\deff0{\\fonttbl{\\f0 Times New Roman;}}' + body + '\\par}\r\n').encode('latin-1')
+
+
+def rtf_object(data, cls, words='\\objemb', objdata_prefix=''):
+    return '{\\object%s{\\*\\objclass %s}{\\*\\objdata %s%s}{\\result {\\pict\\wmetafile8 0100}}}' % (words, cls, objdata_prefix, hexify(data))
+
+
+def rtf_files():
+    files = {}
+    pkg = ole1('Package', package_native('inert.txt', 'C:\\inert\\inert.txt', 'C:\\Temp\\inert.txt', b'inert marker'))
+    eq = ole1('Equation.3', cfb(ole_object([Stream('Equation Native', b'inert marker')], user_type='Microsoft Equation 3.0', prog_id='Equation.3'), root_clsid=EQUATION_CLSID))
+    link = ole1('OLE2Link', cfb([Stream('\x01Ole', ole_stream(url_moniker(INERT_URL))), Stream('\x01CompObj', comp_obj('OLE2Link', 'OLE2Link'))], root_clsid='00000300-0000-0000-C000-000000000046'))
+    files['plain.rtf'] = rtf('Inert text.')
+    files['package.rtf'] = rtf(rtf_object(pkg, 'Package'))
+    files['equation.rtf'] = rtf(rtf_object(eq, 'Equation.3', '\\objemb\\objupdate'))
+    files['ole2link.rtf'] = rtf(rtf_object(link, 'OLE2Link', '\\objautlink\\objupdate'))
+    files['linked.rtf'] = rtf(rtf_object(ole1('Excel.Sheet.8', linked_topic='\\\\inert.example.invalid\\share\\book.xls'), 'Excel.Sheet.8', '\\objlink'))
+    files['objocx.rtf'] = rtf('{\\object\\objocx{\\*\\objclass Inert.Control.1}{\\*\\objdata 0105000002000000}}')
+    files['not-ole1.rtf'] = rtf('{\\object\\objemb{\\*\\objdata 0102030405}}')
+    files['linked-no-data.rtf'] = rtf('{\\object\\objautlink{\\*\\objclass Excel.Sheet.8}}')
+    # The obfuscations rtfobj describes: junk and white space in the hex, a dropped digit before \'hh, \bin data, a
+    # destination group and an ignorable group inside objdata, and objdata outside any \object.
+    h = hexify(eq, 1 << 30)
+    obf = '{\\*\\objdata {\\hlsrc 41414141}{\\*\\inertdest 4242}' + h[:10] + ' z\r\n' + h[10:20] + '7\\\'1R' + h[20:24] + '\\bin2 ' + '\0\0' + h[28:] + '}'
+    files['obfuscated.rtf'] = rtf('{\\object\\objemb\\objupdate' + obf + '}').replace(b'\\bin2 \0\0', b'\\bin2 ' + bytes.fromhex(h[24:28]))
+    files['bare-objdata.rtf'] = rtf('{\\*\\objdata ' + hexify(pkg) + '}')
+    # A linked object of the Equation class, and a linked object whose OLE 1.0 data names no class.
+    linked_storage = cfb([Stream('\x01Ole', ole_stream(url_moniker(INERT_URL)))], root_clsid=EQUATION_CLSID)
+    files['linked-equation.rtf'] = rtf('{\\object\\objemb{\\*\\objdata ' + hexify(ole1('Equation.3', linked_storage)) + '}}')
+    files['linked-no-class.rtf'] = rtf('{\\object\\objemb{\\*\\objdata ' + hexify(ole1('', cfb([Stream('\x01Ole', ole_stream(url_moniker(INERT_URL)))]))) + '}}')
+    files['nested-hidden.rtf'] = rtf('{\\object\\objemb{\\*\\objdata ' + hexify(ole1('Word.Document.8', word_doc('x\r', mutate=lambda m: m['sectors'].__setitem__(m['count'], b'inert hidden'.ljust(512, b'\0')) or m.__setitem__('count', m['count'] + 1)))).upper() + '}}')
+    files['linked-topic-only.rtf'] = rtf('{\\object\\objlink{\\*\\objdata ' + hexify(ole1('', linked_topic='')) + '}}')
+    files['fields.rtf'] = rtf('{\\*\\template \\\\\\\\inert.example.invalid\\\\share\\\\inert.dotm}'
+                              '{\\field{\\*\\fldinst {DDE}{AUTO inert-app "inert topic"}}{\\fldrslt x}}'
+                              '{\\field{\\*\\fldinst INCLUDEPICTURE "https://example.invalid/inert.png" \\\\d}{\\fldrslt }}'
+                              '{\\field{\\*\\fldinst HYPERLINK "https://example.invalid/page"}{\\fldrslt link}}'
+                              '{\\field{\\*\\fldinst \\u77?ACROBUTTON InertMacro click}{\\fldrslt }}'
+                              '{\\field{\\*\\fldinst {\\field{\\*\\fldinst QUOTE "DDEAUTO"}{\\fldrslt DDEAUTO}} inert-app topic}{\\fldrslt }}'
+                              '{\\shp{\\*\\shpinst{\\sp{\\sn pihlShape}{\\sv {\\*\\hl{\\hlfr Inert}{\\hlsrc file:///C:/inert/page.html}}}}}}'
+                              '{\\*\\objdata {\\hlsrc not a hyperlink}}')
+    files['trailing.rtf'] = rtf('Inert text.') + ('{\\object\\objemb{\\*\\objdata ' + hexify(pkg) + '}}').encode('latin-1')
+    files['unbalanced.rtf'] = b'{\\rtf1\\ansi {\\field{\\*\\fldinst DDEAUTO inert-app topic}'
+    files['deep.rtf'] = b'{\\rtf1' + b'{' * 300 + b'}' * 300 + b'}'
+    files['many-destinations.rtf'] = b'{\\rtf1{' + b'\\object' * 300 + b'}}'
+    files['zip-polyglot.rtf'] = assemble(docx_entries(), prefix=rtf('Inert text.'))
+    files['header-only.rtf'] = b'{\\rtxyz inert'
+    return files
+
+
+def cfb_files():
+    """Compound files that each break one rule of MS-CFB, from a small Word document whose WordDocument stream takes
+    regular sectors and whose other streams sit in the mini stream."""
+    def doc(mutate=None, **options):
+        extra = options.pop('extra', [Stream('Data', (bytes(range(256)) * 20)[:5000])])
+        return word_doc('Inert text.\r', extra=extra, mutate=mutate, **options)
+
+    def stream(model, name):
+        return model['layout']['streams'][entry_index(model, name)]
+
+    def mini_chain(model, name):
+        d = model['dir'][entry_index(model, name)]
+        out, s = [], struct.unpack_from('<I', d, 116)[0]
+        while s != ENDOFCHAIN:
+            out.append(s)
+            s = model['minifat'][s]
+        return out
+
+    def fat(model, sector, value):
+        model['fat'][sector] = value
+
+    def nested(model):
+        # A storage whose child is an entry the root's tree already holds.
+        set_entry(model, 'Box', child=entry_index(model, '1Table'))
+
+    files = {}
+    files['valid.doc'] = doc()
+    files['version-4.doc'] = doc(version=4)
+    files['difat.doc'] = doc(fat_sectors=110)
+    def high_bits(m):
+        struct.pack_into('<I', m['dir'][entry_index(m, '1Table')], 124, 0xFFFFFFFF)
+        # An unused entry with zero links, as some writers leave them, holds nothing.
+        struct.pack_into('<III', m['dir'][-1], 68, 0, 0, 0)
+    files['size-high-bits.doc'] = doc(high_bits)
+    files['short.doc'] = doc()[:300]
+    files['version-mismatch.doc'] = doc(lambda m: set_header(m, shift=12))
+    files['mini-sector.doc'] = doc(lambda m: set_header(m, mini_shift=7))
+    files['mini-cutoff.doc'] = doc(lambda m: set_header(m, cutoff=8192))
+    files['byte-order.doc'] = doc(lambda m: set_header(m, byte_order=0xFEFF))
+    files['no-fat.doc'] = doc(lambda m: set_header(m, fat_count=0))
+    files['fat-count.doc'] = doc(lambda m: set_header(m, fat_count=1000))
+    files['fat-past-count.doc'] = doc(lambda m: set_header(m, difat1=3))
+    files['difat-count.doc'] = doc(lambda m: set_header(m, difat_count=1))
+    files['fat-reserved.doc'] = doc(lambda m: set_header(m, difat0=FATSECT))
+    files['fat-outside.doc'] = doc(lambda m: set_header(m, difat0=5000))
+    files['chain-loop.doc'] = doc(lambda m: fat(m, stream(m, 'WordDocument')[3], stream(m, 'WordDocument')[1]))
+    files['chain-free.doc'] = doc(lambda m: fat(m, stream(m, 'WordDocument')[2], FREESECT))
+    files['chain-short.doc'] = doc(lambda m: fat(m, stream(m, 'WordDocument')[2], ENDOFCHAIN))
+    files['chain-outside.doc'] = doc(lambda m: fat(m, stream(m, 'WordDocument')[2], 5000))
+    files['chain-into-fat.doc'] = doc(lambda m: fat(m, stream(m, 'WordDocument')[2], 0))
+    files['chain-longer.doc'] = doc(lambda m: (fat(m, stream(m, 'WordDocument')[-1], m['layout']['dir'][0])))
+    files['shared-sector.doc'] = doc(lambda m: set_entry(m, 'Data', start=stream(m, 'WordDocument')[0], size=4096))
+    files['directory-loop.doc'] = doc(lambda m: fat(m, m['layout']['dir'][-1], m['layout']['dir'][0]))
+    files['no-directory.doc'] = doc(lambda m: set_header(m, first_dir=ENDOFCHAIN))
+    files['tree-loop.doc'] = doc(lambda m: set_entry(m, '1Table', left=entry_index(m, '1Table')))
+    files['entry-twice.doc'] = doc(nested, extra=[Storage('Box', [])])
+    files['entry-outside.doc'] = doc(lambda m: set_entry(m, '1Table', right=900))
+    files['empty-entry.doc'] = doc(lambda m: set_entry(m, '1Table', type=0))
+    files['second-root.doc'] = doc(lambda m: set_entry(m, '1Table', type=5))
+    files['bad-type.doc'] = doc(lambda m: set_entry(m, '1Table', type=7))
+    files['name-odd.doc'] = doc(lambda m: set_entry(m, '1Table', name_length=7))
+    files['name-long.doc'] = doc(lambda m: set_entry(m, '1Table', name_length=66))
+    files['name-nul.doc'] = doc(lambda m: set_entry(m, '1Table', name_bytes='1T\0ble'.encode('utf-16-le')))
+    files['name-unterminated.doc'] = doc(lambda m: set_entry(m, '1Table', name_bytes='1TableX'.encode('utf-16-le')))
+    files['name-slash.doc'] = doc(lambda m: set_entry(m, 'Data', name_bytes='Da/a'.encode('utf-16-le')))
+    files['duplicate-name.doc'] = doc(extra=[Stream('Data', b'inert'), Stream('DATA', b'inert')])
+    files['stream-children.doc'] = doc(lambda m: set_entry(m, 'Data', child=entry_index(m, '1Table')))
+    files['mini-loop.doc'] = doc(lambda m: m['minifat'].__setitem__(mini_chain(m, '\x01CompObj')[0], mini_chain(m, '\x01CompObj')[0]))
+    files['mini-free.doc'] = doc(lambda m: m['minifat'].__setitem__(mini_chain(m, '\x01CompObj')[0], FREESECT))
+    files['mini-short.doc'] = doc(lambda m: m['minifat'].__setitem__(mini_chain(m, '\x01CompObj')[0], ENDOFCHAIN))
+    files['mini-outside.doc'] = doc(lambda m: set_entry(m, '\x01CompObj', start=999))
+    files['mini-shared.doc'] = doc(lambda m: set_entry(m, '\x01CompObj', start=mini_chain(m, '1Table')[0]))
+    files['mini-fat-count.doc'] = doc(lambda m: set_header(m, minifat_count=0))
+    files['size-past-limit.doc'] = doc(lambda m: struct.pack_into('<Q', m['dir'][entry_index(m, 'Data')], 120, 1 << 60), version=4)
+
+    def hidden(m):
+        # A free sector with content, the rest of a stream's last sector, and a directory entry nothing reaches.
+        m['count'] += 2
+        m['sectors'][m['count'] - 2] = b'inert hidden data'.ljust(m['ss'], b'\0')
+        m['sectors'][m['count'] - 1] = b'inert orphan chain'.ljust(m['ss'], b'\0')
+        m['fat'][m['count'] - 1] = ENDOFCHAIN
+        last = stream(m, 'Data')[-1]
+        m['sectors'][last] = m['sectors'][last][:-8] + b'inert!!!'
+        m['dir'][-1][0:12] = 'orph'.encode('utf-16-le') + b'\0\0\0\0'
+        # A mini sector past the mini streams, inside the root entry's size.
+        size = struct.unpack_from('<Q', m['dir'][0], 120)[0]
+        struct.pack_into('<Q', m['dir'][0], 120, size + 64)
+        sector = m['layout']['mini'][size // m['ss']]
+        at = size % m['ss']
+        m['sectors'][sector] = m['sectors'][sector][:at] + b'inert mini data'.ljust(64, b'\0') + m['sectors'][sector][at + 64:]
+    files['hidden-data.doc'] = doc(hidden)
+    files['mini-slack.doc'] = doc(lambda m: m['sectors'].__setitem__(m['layout']['mini'][-1], m['sectors'][m['layout']['mini'][-1]][:-8] + b'inert!!!'))
+    files['header-padding.doc'] = doc(lambda m: m['header'].__setitem__(slice(600, 605), b'inert'), version=4)
+    files['trailing.doc'] = doc(trailing=bytes(65536) + b'inert trailing data')
+
+    def last_in_middle(m):
+        # Data's last sector, the file's last, becomes its second.
+        c = stream(m, 'Data')
+        order = [c[0], c[-1]] + c[2:-1] + [c[1]]
+        for a, b in zip(order, order[1:]):
+            m['fat'][a] = b
+        m['fat'][order[-1]] = ENDOFCHAIN
+    # Data ends 392 bytes into its last sector, which is the file's last. A file can end there, and no sooner.
+    files['partial-last-sector.doc'] = doc()[:-120]
+    files['cut-last-sector.doc'] = doc()[:-200]
+    files['cut-mid-stream.doc'] = doc(last_in_middle)[:-120]
+    return files
+
+
+def binary():
+    """Writes ole/, rtf/ and cfb/, which need nothing but Python."""
+    for folder, files in (('ole', ole_files()), ('rtf', rtf_files()), ('cfb', cfb_files())):
+        shutil.rmtree(os.path.join(OUT, folder), ignore_errors=True)
+        for name, data in files.items():
+            with open(out(folder, name), 'wb') as f:
+                f.write(data)
+
+
+def case_auto_open_name():
+    """An Excel 4.0 macro sheet with the defined name _xlnm.Auto_Open, which runs it as the workbook opens."""
+    items = xlsx(kind='xlsm', workbook_rels=[rel('rId2', MSR + 'xlMacrosheet', 'macrosheets/sheet1.xml')], overrides=[('xl/macrosheets/sheet1.xml', 'application/vnd.ms-excel.macrosheet+xml')],
+                 parts=[('xl/macrosheets/sheet1.xml', XML_DECL + ('<xm:macrosheet xmlns="%s" xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main"><sheetData/></xm:macrosheet>' % S).encode())])
+    name = b'</sheets><definedNames><definedName name="_xlnm.Auto_Open">Macro1!$A$1</definedName></definedNames>'
+    return zip_bytes([(n, d.replace(b'</sheets>', name) if n == 'xl/workbook.xml' else d) for n, d in items])
+
+
+def case_embedded_package():
+    """An Office 2007 object in a Word 97 document: its Package stream is a .docx, whose end record sits in the file's last 64 KiB."""
+    return word_doc('Inert text.\r', extra=[object_pool([(ole_object([Stream('Package', zip_bytes(docx('<w:p/>')))], user_type='Microsoft Word Document', prog_id='Word.Document.12'), '00020906-0000-0000-C000-000000000046')])])
+
+
+def case_stale_sector():
+    """A free sector holding an old copy of a directory sector, as LibreOffice leaves one when it saves."""
+    def stale(m):
+        m['count'] += 1
+        m['sectors'][m['count'] - 1] = bytes(m['dir'][0]) + bytes(384)
+    return word_doc('Inert text.\r', mutate=stale)
+
+
+def case_chain_past_size():
+    """A workbook stream whose chain runs one sector past its size, into the directory."""
+    def longer(m):
+        sectors = m['layout']['streams'][entry_index(m, 'Workbook')]
+        m['fat'][sectors[-1]] = m['layout']['dir'][0]
+    return cfb([Stream('Workbook', workbook([('Sheet1', 0, 0x10)]).ljust(4096, b'\0'))], mutate=longer)
+
+
+def case_ole2link_decoys():
+    """CVE-2017-0199's RTF: decoy groups of other destinations in the object data, \\'hh pairs that drop a digit, and a URL
+    moniker whose colon after https is a character with a stray high byte."""
+    moniker = clsid_bytes(URL_MONIKER) + struct.pack('<I', 2 * 34) + 'https'.encode('utf-16-le') + b':\xa4' + '//example.invalid/inert.hta\0'.encode('utf-16-le')
+    data = hexify(ole1('OLE2Link', cfb([Stream('\x01Ole', ole_stream(moniker))], root_clsid='00000300-0000-0000-C000-000000000046')), 1 << 30)
+    # After each pair, a lone digit that the \\'hh after it drops, as Word drops it.
+    noise = ''.join(data[k] + ("7\\'1R" if k % 2 == 1 else '') for k in range(len(data)))
+    decoys = '{\\hlsrc 4142 \\mmathPict 4647 \\listtable 48}{\\mlimLow 494A} '
+    return rtf('{\\object\\objautlink\\objupdate{\\*\\objdata ' + decoys + noise + '}}')
+
+
+def case_starred_groups():
+    """Object data whose hex digits sit one to a group behind \\* and a control word Word knows, as {\\*\\par574 0}."""
+    eq = ole1('Equation.3', cfb(ole_object([Stream('Equation Native', b'inert marker')], user_type='Microsoft Equation 3.0', prog_id='Equation.3'), root_clsid=EQUATION_CLSID))
+    digits = ''.join('{\\*\\par%d %s}' % (k, c) for k, c in enumerate(eq.hex()[:64])) + eq.hex()[64:]
+    return rtf('{\\object\\objemb\\objupdate{\\*\\objdata ' + digits + '}}')
+
+
 CASES = [
     # Fixed: packages office-defuse failed to read or misjudged.
     ('descriptor-empty-entry.ods', case_descriptor_empty_entry),
@@ -1108,6 +2299,34 @@ CASES = [
     ('empty-archive.xlsx', lambda: assemble([])),
     ('odf-inside-folder.odt', lambda: zip_bytes([('package/' + n, d) for n, d in odf()])),
     ('mimetype-not-media-type.odt', lambda: zip_bytes([(n, b'\x89PNG\r\n\x1a\n' if n == 'mimetype' else d) for n, d in odf()])),
+    # Compound files and RTF, which 0.1.0 refused as not a ZIP archive.
+    ('ole-vba-macros.doc', lambda: word_doc('Inert text.\r', extra=[Storage('Macros', VBA_PROJECT)])),
+    ('ole-embedded-package.doc', case_embedded_package),
+    ('ole-stale-directory-sector.doc', case_stale_sector),
+    ('ole-chain-past-size.xls', case_chain_past_size),
+    ('ole-mini-fat-count-only.xls', lambda: cfb([Stream('Workbook', workbook([('Sheet1', 0, 0x10)]).ljust(4096, b'\0'))], mutate=lambda m: set_header(m, minifat_count=1))),
+    ('ole-unused-entry-in-tree.doc', lambda: word_doc('Inert text.\r', mutate=lambda m: set_entry(m, '1Table', type=0))),
+    ('ole-excel-dde-link.xls', lambda: xls([('Sheet1', 0, 0x10)], globals_extra=supbook(0, 'inert-app\x03inert topic') + extern_name('A1', 0x7FE2) + extern_name('StdDocumentName', 0x7FEA))),
+    ('ole-excel-encoded-paths.xls', lambda: xls([('Sheet1', 0, 0x10)], globals_extra=supbook(1, '\x01\x01@inert.example.invalid\x03share\x03a.xls') + supbook(1, '\x01\x05\x1chttps://example.invalid/books\x03b.xls') + supbook(1, '\x01\x02dir\x03c.xls'))),
+    ('ole-xlm-velvetsweatshop.xls', lambda: cfb([Stream('Workbook', biff_encrypt(workbook([('Sheet1', 0, 0x10), ('Macro1', 1, 0x40)], globals_extra=lbl('', builtin=1)), 'VelvetSweatshop'))])),
+    ('ole-word6-wordbasic.dot', lambda: word6_doc('Inert text.\r', macros=64, dot=True)),
+    ('ole-compressed-equation.ppt', lambda: ppt(objects=[(3, ex_ole_stg(cfb(ole_object([Stream('Equation Native', b'inert marker')], user_type='Microsoft Equation 3.0', prog_id='Equation.3'), root_clsid=EQUATION_CLSID), True))],
+                                               document=prec(0x0409, prec(0x0FCC, prec(0x0FC3, struct.pack('<IIIIII', 1, 0, 1, 0, 3, 0)), container=True), container=True))),
+    ('ole-message-attachments.msg', lambda: msg([attachment(0, 1, 'inert.txt', 'text/plain', data=b'inert marker'), attachment(1, 2, 'shared.txt', path='\\\\inert.example.invalid\\share\\shared.txt')])),
+    ('ole-publisher95.pub', lambda: cfb([Stream('Contents', bytes(64)), Storage('Objects', [])], root_clsid='00021201-0000-0000-00C0-000000000046')),
+    ('ole-other-word-identifier.doc', lambda: cfb([Stream('WordDocument', struct.pack('<H', 0xA699) + bytes(2046))])),
+    ('ole-powerpoint4.ppt', lambda: cfb([Stream('PP40', bytes(256)), Stream('\x05SummaryInformation', bytes(48))])),
+    ('ole-bare-equation-object.bin', lambda: cfb(ole_object([Stream('Equation Native', b'inert marker')], user_type='Microsoft Equation 3.0', prog_id='Equation.3'), root_clsid=EQUATION_CLSID)),
+    ('ole-velvetsweatshop-package.xlsx', lambda: encrypted_package(zip_package('xlsx'), 'VelvetSweatshop', spin=1000)),
+    ('ole-encrypted-package-stub.docx', lambda: encrypted_package(zip_package('docx'), 'VelvetSweatshop', kind='standard', stub=True)),
+    ('ole-password-package.docx', lambda: encrypted_package(zip_package('docx'), 'inert-password', spin=1000)),
+    ('rtf-ole2link-decoys.rtf', case_ole2link_decoys),
+    ('rtf-equation-starred-groups.rtf', case_starred_groups),
+    ('rtf-ole2link-cut-storage.rtf', lambda: rtf(rtf_object(ole1('OLE2Link', cfb([Stream('\x01Ole', ole_stream(url_moniker(INERT_URL)))])[:1600]), 'OLE2Link', '\\objautlink\\objupdate'))),
+    ('rtf-text-past-document.rtf', lambda: b'{\\rtf1\\ansi Inert text.\\par}}\r\nInert text past the document group.\\par}'),
+    ('rtf-activex-control.rtf', lambda: rtf('{\\object\\objocx{\\*\\objclass Inert.Control.1}{\\*\\objdata ' + hexify(ole1('Inert.Control.1', b'inert marker')) + '}}')),
+    ('rtf-remote-template.rtf', lambda: rtf('{\\*\\template https://example.invalid/inert.dotm}')),
+    ('xlm-auto-open-name.xlsm', case_auto_open_name),
 ]
 
 
@@ -1126,11 +2345,15 @@ def cases():
 def main():
     try:
         if sys.argv[1:] != ['cases']:
-            for sub in ('lo', 'docs', 'zip'):
+            for sub in ('lo', 'docs', 'zip', 'ole', 'rtf', 'cfb'):
                 shutil.rmtree(os.path.join(OUT, sub), ignore_errors=True)
             soffice_exports()
             docs()
             zips()
+            binary()
+            for sub in ('docs', 'zip'):
+                for name in sorted(os.listdir(os.path.join(OUT, sub))):
+                    fixed_times(os.path.join(OUT, sub, name))
         cases()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)

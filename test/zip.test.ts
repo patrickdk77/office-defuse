@@ -200,7 +200,7 @@ describe('ZIP reader', () => {
     const r = await inspectOffice(fixture('cases', 'wrong-crc.docx'));
     const f = must(of(r, 'CONTAINER/DATA_ERROR')[0], 'finding');
     expect(f.location).to.equal('word/document.xml');
-    expect(f.description).to.equal("An entry's data does not match its declared size and checksum: word/document.xml");
+    expect(f.description).to.equal("An entry's data does not match its declared size or checksum: word/document.xml");
   });
 
   const accepted = ['minimal.docx', 'descriptor.docx', 'descriptor-nosig.docx', 'streamed.docx', 'zip64.docx'];

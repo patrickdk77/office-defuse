@@ -1,7 +1,9 @@
-import { clip, type RunContext } from './context';
+import { autoName } from './biff';
+import { clip, type ZipContext } from './context';
 import { StopError } from './errors';
+import { FieldStack } from './fields';
 import { OOXML_FORMATS } from './formats';
-import { fieldWords, Quotes } from './formulas';
+import { Quotes } from './formulas';
 import { isAbsoluteTarget, isFragment } from './links';
 import { OfficeCategory as C, OfficeDetail as D } from './types';
 import { XlsbLinks } from './xlsb';
@@ -73,8 +75,6 @@ const CUSTOM_UI_NS = new Set(['http://schemas.microsoft.com/office/2006/01/custo
 const VML_EXCEL_NS = 'urn:schemas-microsoft-com:office:excel';
 const VISIO_NS = 'http://schemas.microsoft.com/office/visio/2012/main';
 const VISIO_CODE = /\b(RUNADDON|RUNADDONWARGS|CALLTHIS|RUNMACRO|OPENFILE|DOOLEVERB)\s*\(/i;
-/** How much of a field code is kept, counted from its first word, which names the field. */
-const MAX_FIELD_CODE = 4096;
 
 interface Relationship {
   id: string;
@@ -120,13 +120,13 @@ function resolveTarget(relsName: string, target: string): string {
   return nameKey(out.join('/'));
 }
 
-const duplicate = (ctx: RunContext, location: string, kind: string, name: string) => ctx.report(C.Package, D.DuplicateEntry, location, { kind, name: clip(name) });
+const duplicate = (ctx: ZipContext, location: string, kind: string, name: string) => ctx.report(C.Package, D.DuplicateEntry, location, { kind, name: clip(name) });
 
 /**
  * The defaults and overrides of [Content_Types].xml. Only those that type an entry of the archive are kept, so a
  * part full of declarations costs no memory. Two that type the same entry make PACKAGE/DUPLICATE_ENTRY.
  */
-async function readContentTypes(ctx: RunContext, entry: ZipEntry): Promise<{ defaults: Map<string, string>; overrides: Map<string, string> }> {
+async function readContentTypes(ctx: ZipContext, entry: ZipEntry): Promise<{ defaults: Map<string, string>; overrides: Map<string, string> }> {
   const keys = new Set(ctx.zip.entries.map(e => nameKey(e.name)));
   const extensions = new Set(ctx.zip.entries.map(e => /\.([^./]*)$/.exec(e.name)?.[1]?.toLowerCase() ?? ''));
   const defaults = new Map<string, string>();
@@ -155,7 +155,7 @@ async function readContentTypes(ctx: RunContext, entry: ZipEntry): Promise<{ def
 }
 
 /** Reads a relationships part and hands each relationship to `each` as it is read. Ids given twice are reported. */
-async function readRelationships(ctx: RunContext, entry: ZipEntry, each: (r: Relationship) => void): Promise<void> {
+async function readRelationships(ctx: ZipContext, entry: ZipEntry, each: (r: Relationship) => void): Promise<void> {
   const ids = new Set<string>();
   await ctx.parse(entry, {
     start(el) {
@@ -171,37 +171,21 @@ async function readRelationships(ctx: RunContext, entry: ZipEntry, each: (r: Rel
   });
 }
 
-/** Word field codes, followed through nested fields, as one part's fields run. */
+/** Word field codes in WordprocessingML: fldSimple, and fldChar marks around instrText. */
 class Fields {
-  private readonly stack: Array<{ code: string; inCode: boolean; computed: boolean }> = [];
+  private readonly stack: FieldStack;
   private capture = false;
-  constructor(
-    private readonly ctx: RunContext,
-    private readonly part: string,
-  ) {}
-
-  /** A field starts. One that starts before its parent's code has a word in it makes that code at run time. */
-  private nest(): void {
-    const top = this.stack[this.stack.length - 1];
-    if (top?.inCode && top.code === '') top.computed = true;
+  constructor(ctx: ZipContext, part: string) {
+    this.stack = new FieldStack(ctx, part);
   }
 
   start(el: XmlElement): void {
-    if (el.local === 'fldSimple') {
-      this.nest();
-      this.evaluate(wordAttr(el, 'instr') ?? '', false);
-    } else if (el.local === 'fldChar') {
+    if (el.local === 'fldSimple') this.stack.simple(wordAttr(el, 'instr') ?? '');
+    else if (el.local === 'fldChar') {
       const kind = wordAttr(el, 'fldCharType');
-      if (kind === 'begin') {
-        this.nest();
-        this.stack.push({ code: '', inCode: true, computed: false });
-      } else if (kind === 'separate') {
-        const top = this.stack[this.stack.length - 1];
-        if (top) top.inCode = false;
-      } else if (kind === 'end') {
-        const f = this.stack.pop();
-        if (f) this.evaluate(f.code, f.computed);
-      }
+      if (kind === 'begin') this.stack.begin();
+      else if (kind === 'separate') this.stack.separate();
+      else if (kind === 'end') this.stack.end();
     } else if (el.local === 'instrText' || el.local === 'delInstrText') this.capture = true;
   }
 
@@ -209,41 +193,12 @@ class Fields {
     if (el.local === 'instrText' || el.local === 'delInstrText') this.capture = false;
   }
 
-  /** White space before the first word counts for nothing, so no amount of it can push the field's name out. */
   text(t: string): void {
-    const top = this.stack[this.stack.length - 1];
-    if (this.capture && top?.inCode && top.code.length < MAX_FIELD_CODE) top.code = top.code ? top.code + t : t.trimStart();
+    if (this.capture) this.stack.text(t);
   }
 
-  /** A part can end inside a field. Word still reads the code it has. */
   finish(): void {
-    for (let f = this.stack.pop(); f; f = this.stack.pop()) this.evaluate(f.code, f.computed);
-  }
-
-  /**
-   * Reports a field by its code. A field whose name holds the content of an external entity has a type the file does
-   * not say, as one whose name another field builds does.
-   */
-  private evaluate(code: string, computed: boolean): void {
-    const data = { code: clip(code.trim()) };
-    const words = fieldWords(code);
-    const first = words[0]?.text ?? '';
-    const entity = unknownEntity(first);
-    if (computed || entity !== undefined) this.ctx.report(C.Field, D.Computed, this.part, entity === undefined ? data : { ...data, entity: clip(entity) });
-    const name = first.toUpperCase();
-    // An argument comes before any switch, and a switch is an unquoted word starting with a backslash.
-    const switchAt = words.findIndex(w => !w.quoted && w.text.startsWith('\\'));
-    const arg = (n: number) => (words[n] !== undefined && (switchAt < 0 || n < switchAt) ? words[n].text : undefined);
-    if (name === 'DDE' || name === 'DDEAUTO') this.ctx.report(C.Dde, D.Field, this.part, data);
-    else if (name === 'MACROBUTTON') this.ctx.report(C.Field, D.Macrobutton, this.part, { ...data, macro: clip(words[1]?.text ?? '') });
-    else if (name === 'INCLUDETEXT' || name === 'INCLUDEPICTURE' || name === 'IMPORT' || name === 'LINK') {
-      const target = arg(name === 'LINK' ? 2 : 1);
-      if (target === undefined) this.ctx.report(C.External, D.Include, this.part, data);
-      else this.ctx.external(D.Include, target, this.part, data, 'field');
-    } else if (name === 'HYPERLINK') {
-      const target = arg(1);
-      if (target !== undefined && !isFragment(target)) this.ctx.link(target, this.part, { ...data, source: 'HYPERLINK field' });
-    }
+    this.stack.finish();
   }
 }
 
@@ -271,7 +226,7 @@ class PartRules implements XmlHandler {
   private lower = '';
 
   constructor(
-    private readonly ctx: RunContext,
+    private readonly ctx: ZipContext,
     private readonly part: string,
   ) {
     this.fields = new Fields(ctx, part);
@@ -297,7 +252,12 @@ class PartRules implements XmlHandler {
     if (WORD_NS.has(ns)) this.fields.start(el);
     else if (SHEET_NS.has(ns)) {
       if (el.local === 'f' || el.local === 'definedName') this.formula = { shown: new Shown(), quotes: new Quotes(), ddeBar: false };
-      else if (el.local === 'ddeLink') this.ctx.report(C.Dde, D.Link, this.part, { application: clip(attr(el, '', 'ddeService') ?? ''), topic: clip(attr(el, '', 'ddeTopic') ?? '') });
+      if (el.local === 'definedName') {
+        // Excel runs the macro a name like _xlnm.Auto_Open refers to, as it does in a binary workbook.
+        const name = attr(el, '', 'name') ?? '';
+        const auto = autoName(name);
+        if (auto) this.ctx.report(C.Macro, auto.onOpen ? D.EventOnOpen : D.Event, this.part, { event: auto.event, name: clip(name) });
+      } else if (el.local === 'ddeLink') this.ctx.report(C.Dde, D.Link, this.part, { application: clip(attr(el, '', 'ddeService') ?? ''), topic: clip(attr(el, '', 'ddeTopic') ?? '') });
     } else if (XDR_NS.has(ns)) {
       const macro = attr(el, '', 'macro');
       if (macro?.trim()) this.ctx.report(C.Macro, D.Link, this.part, { macro: clip(macro) });
@@ -363,7 +323,7 @@ class PartRules implements XmlHandler {
  * Then each part is read in archive order, followed by its relationships, which are reported as they are read and
  * leave behind only which parts they reach and how.
  */
-export async function inspectOoxml(ctx: RunContext, contentTypes: ZipEntry): Promise<void> {
+export async function inspectOoxml(ctx: ZipContext, contentTypes: ZipEntry): Promise<void> {
   const { defaults, overrides } = await readContentTypes(ctx, contentTypes);
   const parts = new Map<string, Part>();
   const relsOf = new Map<string, ZipEntry>();
@@ -441,7 +401,7 @@ export async function inspectOoxml(ctx: RunContext, contentTypes: ZipEntry): Pro
 }
 
 /** Findings about a whole part, from its content type and the relationships that reach it. */
-function partRules(ctx: RunContext, p: Part): void {
+function partRules(ctx: ZipContext, p: Part): void {
   const ct = p.contentType ?? '';
   const loc = p.entry.name;
   const data = { part: loc, contentType: clip(ct) };
@@ -460,7 +420,7 @@ function partRules(ctx: RunContext, p: Part): void {
 }
 
 /** Parts that no chain of internal relationships reaches from the package. */
-function unreferenced(ctx: RunContext, parts: Map<string, Part>, relsOf: Map<string, ZipEntry>, roots: Set<Part>): void {
+function unreferenced(ctx: ZipContext, parts: Map<string, Part>, relsOf: Map<string, ZipEntry>, roots: Set<Part>): void {
   const reached = new Set<Part>(roots);
   const queue = [...roots];
   for (let p = queue.pop(); p; p = queue.pop()) {

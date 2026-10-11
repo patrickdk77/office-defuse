@@ -54,6 +54,10 @@ describe('engine', () => {
     const custom = new Error('bucket went away');
     expect(await failure(inspectOfficeSource(sourceOf(bytes, async () => Promise.reject(custom))))).to.equal(custom);
     expect(await failure(inspectOfficeSource({ size: async () => Promise.reject(custom), read: async () => new Uint8Array(0) }))).to.equal(custom);
+    // The ZIP reader also reads a compound file or RTF from the end, and an error from that read comes back too.
+    for (const file of [fixture('ole', 'word.doc'), fixture('rtf', 'plain.rtf')]) {
+      expect(await failure(inspectOfficeSource(sourceOf(file, async (o, n) => (o === 0 && n <= 8 ? file.subarray(0, n) : Promise.reject(custom)))))).to.equal(custom);
+    }
   });
 
   it('fails with EIO when a read returns more or fewer bytes than asked', async () => {

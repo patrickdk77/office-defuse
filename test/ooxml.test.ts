@@ -194,9 +194,15 @@ describe('OOXML rules', () => {
   it('reports Excel DDE, external workbooks, macro sheets and shapes that run macros', async () => {
     const r = await inspectOffice(fixture('docs', 'excel.xlsm'));
     expect(r.format).to.equal('xlsm');
-    expect(kinds(r)).to.deep.equal(['DDE/FORMULA', 'DDE/LINK', 'EXTERNAL/WORKBOOK', 'MACRO/LINK', 'MACRO/LINK', 'MACRO/XLM_MACROSHEET']);
+    expect(kinds(r)).to.deep.equal(['MACRO/EVENT_ON_OPEN', 'DDE/FORMULA', 'DDE/LINK', 'EXTERNAL/WORKBOOK', 'MACRO/LINK', 'MACRO/LINK', 'MACRO/XLM_MACROSHEET']);
+    expect(of(r, 'MACRO/EVENT_ON_OPEN').map(f => f.data)).to.deep.equal([{ event: 'Auto_Open', name: '_xlnm.Auto_Open' }]);
     expect(of(r, 'DDE/FORMULA').map(f => f.data?.formula)).to.deep.equal(["cmd|' /c calc'!A0"]);
     expect(of(r, 'MACRO/LINK').map(f => f.data?.macro)).to.deep.equal(['[0]!Module1.Run', '[0]!Module1.Click']);
+  });
+
+  it('reports defined names Excel runs as macros when the workbook opens or closes, and skips names without a name', async () => {
+    const r = await inspectOffice(await wordWithPart(sheetXml('', '<definedNames><definedName>A1</definedName><definedName name="auto_close_x">A1</definedName></definedNames>')));
+    expect(r.findings.map(f => [`${f.category}/${f.detail}`, f.data])).to.deep.equal([['MACRO/EVENT', { event: 'Auto_Close', name: 'auto_close_x' }]]);
   });
 
   it('finds DDE in a formula of any length, outside quotes, and in defined names', async () => {

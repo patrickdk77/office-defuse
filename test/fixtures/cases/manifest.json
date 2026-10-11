@@ -234,10 +234,124 @@
     "before": {"status":"strippable","risk":"HIGH","format":"odp","kinds":["LINK/SCRIPT_URL"]}
   },
   {
+    "file": "ole-bare-equation-object.bin",
+    "issue": "A compound file that is an Equation Editor object on its own, with no document around it. It is no format office-defuse reads, so PACKAGE/UNRECOGNIZED rejects it.",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["PACKAGE/UNRECOGNIZED"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/NOT_ZIP"]}
+  },
+  {
+    "file": "ole-chain-past-size.xls",
+    "issue": "A Workbook stream whose FAT chain runs one sector past the stream's size, into the directory. office-defuse follows the chain only as far as the size needs, as olefile and LibreOffice do, and the workbook reads clean.",
+    "expected": {"status":"clean","risk":"NONE","format":"xls","kinds":[]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/NOT_ZIP"]}
+  },
+  {
+    "file": "ole-compressed-equation.ppt",
+    "issue": "A PowerPoint 97 presentation whose embedded object is stored compressed and holds an Equation Editor object. office-defuse inflates the storage and reports the object as EMBEDDED/EQUATION.",
+    "expected": {"status":"strippable","risk":"CRITICAL","format":"ppt","kinds":["EMBEDDED/EQUATION","EMBEDDED/OLE_OBJECT"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/NOT_ZIP"]}
+  },
+  {
+    "file": "ole-embedded-package.doc",
+    "issue": "A Word 97 document holding an Office 2007 object, whose Package stream is a .docx. That .docx ends in the file's last 64 KiB, so 0.1.0 found its end record, read the file as a ZIP and rejected it for a directory mismatch.",
+    "expected": {"status":"strippable","risk":"MEDIUM","format":"doc","kinds":["EMBEDDED/OLE_OBJECT"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/DIRECTORY_MISMATCH"]}
+  },
+  {
+    "file": "ole-encrypted-package-stub.docx",
+    "issue": "A .docx with Standard encryption under the default password. Beside the package sits a WordDocument stream of zeros, as Word writes for older readers. It holds no FIB, so office-defuse leaves it alone and opens the package.",
+    "expected": {"status":"strippable","risk":"LOW","format":"docx","kinds":["ENCRYPTED/AES_128","ENCRYPTED/DEFAULT_PASSWORD"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/NOT_ZIP"]}
+  },
+  {
+    "file": "ole-excel-dde-link.xls",
+    "issue": "An Excel 97 workbook with a DDE link, a SupBook naming an application and topic and an ExternName without the OLE flag. A StdDocumentName item with the OLE flag sits beside it, and it does not turn the DDE link into an OLE link.",
+    "expected": {"status":"strippable","risk":"HIGH","format":"xls","kinds":["DDE/LINK"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/NOT_ZIP"]}
+  },
+  {
+    "file": "ole-excel-encoded-paths.xls",
+    "issue": "External workbook references in Excel's encoded VirtualPath form: a UNC volume, a URL volume with a length prefix, and a path from the drive root. Each one is reported as the path Excel would open.",
+    "expected": {"status":"strippable","risk":"MEDIUM","format":"xls","kinds":["EXTERNAL/LOCAL_FILE","EXTERNAL/WORKBOOK"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/NOT_ZIP"]}
+  },
+  {
+    "file": "ole-message-attachments.msg",
+    "issue": "An Outlook message with one attachment by value and one by reference to a UNC share. The first is reported as EMBEDDED/ATTACHMENT with its name and type, the second as an external link.",
+    "expected": {"status":"strippable","risk":"MEDIUM","format":"msg","kinds":["EMBEDDED/ATTACHMENT","EXTERNAL/OTHER"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/NOT_ZIP"]}
+  },
+  {
+    "file": "ole-mini-fat-count-only.xls",
+    "issue": "A header that counts one mini FAT sector but names no mini FAT chain, in a file without small streams. The mini FAT only has to cover the mini sectors in use, so the file reads clean.",
+    "expected": {"status":"clean","risk":"NONE","format":"xls","kinds":[]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/NOT_ZIP"]}
+  },
+  {
     "file": "ole-object.xlsx",
     "issue": "An embedded OLE object. The object is an inert marker.",
     "expected": {"status":"strippable","risk":"MEDIUM","format":"xlsx","kinds":["EMBEDDED/OLE_OBJECT"]},
     "before": {"status":"strippable","risk":"MEDIUM","format":"xlsx","kinds":["EMBEDDED/OLE_OBJECT"]}
+  },
+  {
+    "file": "ole-other-word-identifier.doc",
+    "issue": "A WordDocument stream whose identifier is neither Word 97's 0xA5EC nor Word 6's 0xA5DC. Without a FIB to read, office-defuse rejects it as unrecognized.",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"doc","kinds":["PACKAGE/UNRECOGNIZED"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/NOT_ZIP"]}
+  },
+  {
+    "file": "ole-password-package.docx",
+    "issue": "A .docx with Agile encryption under a password that is neither the default one nor one the caller gave. ENCRYPTED/PASSWORD_REQUIRED rejects it.",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["ENCRYPTED/PASSWORD_REQUIRED"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/NOT_ZIP"]}
+  },
+  {
+    "file": "ole-powerpoint4.ppt",
+    "issue": "A compound file with a PP40 stream and no PowerPoint Document stream, the PowerPoint 4 layout. office-defuse does not read that format and rejects it as unrecognized.",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["PACKAGE/UNRECOGNIZED"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/NOT_ZIP"]}
+  },
+  {
+    "file": "ole-publisher95.pub",
+    "issue": "A Publisher file in the older layout, a Contents stream and an Objects storage under the Publisher class id with no Quill storage. office-defuse reads it as .pub at the container level.",
+    "expected": {"status":"clean","risk":"NONE","format":"pub","kinds":[]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/NOT_ZIP"]}
+  },
+  {
+    "file": "ole-stale-directory-sector.doc",
+    "issue": "A free sector holding an old copy of a directory sector, as LibreOffice leaves one when it saves. CONTAINER/HIDDEN_DATA reports the 512 bytes for stripping.",
+    "expected": {"status":"strippable","risk":"LOW","format":"doc","kinds":["CONTAINER/HIDDEN_DATA"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/NOT_ZIP"]}
+  },
+  {
+    "file": "ole-unused-entry-in-tree.doc",
+    "issue": "A directory entry of type 0, unused, that the red-black tree still links to. CONTAINER/BAD_ENTRY rejects the file.",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/BAD_ENTRY"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/NOT_ZIP"]}
+  },
+  {
+    "file": "ole-vba-macros.doc",
+    "issue": "A Word 97 document with a VBA project in its Macros storage.",
+    "expected": {"status":"strippable","risk":"HIGH","format":"doc","kinds":["MACRO/VBA_PROJECT"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/NOT_ZIP"]}
+  },
+  {
+    "file": "ole-velvetsweatshop-package.xlsx",
+    "issue": "A .xlsx with Agile AES-256 encryption under the default password VelvetSweatshop. office-defuse decrypts the package and reads it like any other .xlsx.",
+    "expected": {"status":"strippable","risk":"LOW","format":"xlsx","kinds":["ENCRYPTED/AES_256","ENCRYPTED/DEFAULT_PASSWORD"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/NOT_ZIP"]}
+  },
+  {
+    "file": "ole-word6-wordbasic.dot",
+    "issue": "A Word 6 template with a WordBasic macro table.",
+    "expected": {"status":"strippable","risk":"HIGH","format":"dot","kinds":["MACRO/WORDBASIC"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/NOT_ZIP"]}
+  },
+  {
+    "file": "ole-xlm-velvetsweatshop.xls",
+    "issue": "An Excel 97 workbook with RC4 encryption under VelvetSweatshop, holding a hidden Excel 4.0 macro sheet and a built-in Auto_Open name. office-defuse decrypts the records and reports both.",
+    "expected": {"status":"strippable","risk":"CRITICAL","format":"xls","kinds":["ENCRYPTED/DEFAULT_PASSWORD","ENCRYPTED/RC4_40","MACRO/EVENT_ON_OPEN","MACRO/XLM_MACROSHEET"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/NOT_ZIP"]}
   },
   {
     "file": "one-byte-local-extra.docx",
@@ -268,6 +382,42 @@
     "issue": "A custom ribbon whose button calls a macro.",
     "expected": {"status":"strippable","risk":"MEDIUM","format":"xlsm","kinds":["UI/CALLBACK","UI/RIBBON"]},
     "before": {"status":"strippable","risk":"MEDIUM","format":"xlsm","kinds":["UI/CALLBACK","UI/RIBBON"]}
+  },
+  {
+    "file": "rtf-activex-control.rtf",
+    "issue": "An RTF object marked \\objocx whose class is an ActiveX control.",
+    "expected": {"status":"strippable","risk":"HIGH","format":"rtf","kinds":["CONTROL/ACTIVEX"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/NOT_ZIP"]}
+  },
+  {
+    "file": "rtf-equation-starred-groups.rtf",
+    "issue": "Object data whose first hex digits sit one to a group behind \\* and a control word Word knows, as {\\*\\par574 0}. Word reads those digits and finds an Equation Editor object. A reader that skips the groups gets other bytes, so office-defuse reports both readings.",
+    "expected": {"status":"strippable","risk":"CRITICAL","format":"rtf","kinds":["ACTION/OBJECT_UPDATE","EMBEDDED/EQUATION","EMBEDDED/OLE_OBJECT"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/NOT_ZIP"]}
+  },
+  {
+    "file": "rtf-ole2link-cut-storage.rtf",
+    "issue": "An \\objautlink object of class OLE2Link whose compound file is cut short, so its moniker does not read. office-defuse still reports it as a link that updates on open.",
+    "expected": {"status":"strippable","risk":"HIGH","format":"rtf","kinds":["ACTION/OBJECT_UPDATE","EXTERNAL/OBJECT"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/NOT_ZIP"]}
+  },
+  {
+    "file": "rtf-ole2link-decoys.rtf",
+    "issue": "Object data in the form CVE-2017-0199 used: decoy groups of other destinations, \\'hh pairs that drop a hex digit, and a URL moniker whose colon carries a stray high byte. office-defuse finds the link and its \\objupdate.",
+    "expected": {"status":"strippable","risk":"HIGH","format":"rtf","kinds":["ACTION/OBJECT_UPDATE","EXTERNAL/OBJECT"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/NOT_ZIP"]}
+  },
+  {
+    "file": "rtf-remote-template.rtf",
+    "issue": "An RTF \\*\\template destination naming a template on a web server.",
+    "expected": {"status":"strippable","risk":"HIGH","format":"rtf","kinds":["EXTERNAL/TEMPLATE"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/NOT_ZIP"]}
+  },
+  {
+    "file": "rtf-text-past-document.rtf",
+    "issue": "Text after the brace that closes the document group. CONTAINER/TRAILING_BYTES reports it for stripping.",
+    "expected": {"status":"strippable","risk":"LOW","format":"rtf","kinds":["CONTAINER/TRAILING_BYTES"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/NOT_ZIP"]}
   },
   {
     "file": "sun-xml-calc.ods",
@@ -370,6 +520,12 @@
     "issue": "An entry whose data does not match its CRC.",
     "expected": {"status":"rejected","risk":"UNKNOWN","format":"docx","kinds":["CONTAINER/DATA_ERROR"]},
     "before": {"status":"rejected","risk":"UNKNOWN","format":"docx","kinds":["CONTAINER/DATA_ERROR"]}
+  },
+  {
+    "file": "xlm-auto-open-name.xlsm",
+    "issue": "An Excel 4.0 macro sheet with the defined name _xlnm.Auto_Open, which runs it when the workbook opens. 0.1.0 reported the macro sheet and missed the name.",
+    "expected": {"status":"strippable","risk":"CRITICAL","format":"xlsm","kinds":["MACRO/EVENT_ON_OPEN","MACRO/XLM_MACROSHEET"]},
+    "before": {"status":"strippable","risk":"HIGH","format":"xlsm","kinds":["MACRO/XLM_MACROSHEET"]}
   },
   {
     "file": "xlm-macrosheet.xlsm",

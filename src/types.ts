@@ -37,6 +37,11 @@ export enum OfficeDetail {
   LeadingBytes = 'LEADING_BYTES',
   HiddenData = 'HIDDEN_DATA',
   TrailingBytes = 'TRAILING_BYTES',
+  BadHeader = 'BAD_HEADER',
+  BrokenChain = 'BROKEN_CHAIN',
+  ChainLoop = 'CHAIN_LOOP',
+  DirectoryLoop = 'DIRECTORY_LOOP',
+  BadEntry = 'BAD_ENTRY',
   // XML
   Doctype = 'DOCTYPE',
   InternalSubset = 'INTERNAL_SUBSET',
@@ -53,6 +58,7 @@ export enum OfficeDetail {
   XmlEntityDepth = 'XML_ENTITY_DEPTH',
   XmlEntityExpansions = 'XML_ENTITY_EXPANSIONS',
   XmlEntitySize = 'XML_ENTITY_SIZE',
+  RtfDepth = 'RTF_DEPTH',
   Time = 'TIME',
   // PACKAGE
   Unrecognized = 'UNRECOGNIZED',
@@ -64,9 +70,19 @@ export enum OfficeDetail {
   OdfLayout = 'ODF_LAYOUT',
   // ENCRYPTED
   PasswordRequired = 'PASSWORD_REQUIRED',
+  DefaultPassword = 'DEFAULT_PASSWORD',
+  UserPassword = 'USER_PASSWORD',
+  Rc4_40 = 'RC4_40',
+  Rc4_128 = 'RC4_128',
+  Rc4Other = 'RC4_OTHER',
+  Aes128 = 'AES_128',
+  Aes192 = 'AES_192',
+  Aes256 = 'AES_256',
+  UnsupportedAlgorithm = 'UNSUPPORTED_ALGORITHM',
   // MACRO
   VbaProject = 'VBA_PROJECT',
   XlmMacrosheet = 'XLM_MACROSHEET',
+  WordBasic = 'WORDBASIC',
   OdfBasic = 'ODF_BASIC',
   OdfScripts = 'ODF_SCRIPTS',
   OdfDialogs = 'ODF_DIALOGS',
@@ -80,6 +96,7 @@ export enum OfficeDetail {
   // ACTION
   RunProgram = 'RUN_PROGRAM',
   OleVerb = 'OLE_VERB',
+  ObjectUpdate = 'OBJECT_UPDATE',
   // DDE
   Field = 'FIELD',
   Formula = 'FORMULA',
@@ -114,6 +131,8 @@ export enum OfficeDetail {
   OleFile = 'OLE_FILE',
   Applet = 'APPLET',
   Plugin = 'PLUGIN',
+  Equation = 'EQUATION',
+  Attachment = 'ATTACHMENT',
   // CONTROL
   ActiveX = 'ACTIVEX',
 }
@@ -206,6 +225,8 @@ export interface OfficeLimits {
   xmlEntityExpansions?: number;
   /** Characters of entity text expanded in the whole run. Default 16 Mi. */
   xmlEntitySize?: number;
+  /** Group nesting in an RTF file, and destinations open at once. Default 256. */
+  rtfDepth?: number;
   /** Milliseconds for the whole run. Not enforced unless set. */
   timeMs?: number;
 }
@@ -271,6 +292,12 @@ export interface OfficeScoreBands {
 }
 
 export interface OfficeOptions {
+  /**
+   * Tried first on an encrypted file: an encrypted OOXML package, or an .xls workbook. If it does not open the file,
+   * the password Excel opens it with by default, VelvetSweatshop, is tried. Pass it in code, never on a command line,
+   * where other users can read it.
+   */
+  password?: string;
   limits?: OfficeLimits;
   actionOverrides?: OfficeActionOverride[];
   scoreWeights?: OfficeScoreWeight[];

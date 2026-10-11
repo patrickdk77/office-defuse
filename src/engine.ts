@@ -1,10 +1,12 @@
-import { RunContext } from './context';
+import { CFB_SIGNATURE, CompoundFile } from './cfb';
+import { RunContext, type RunSettings } from './context';
 import { checkTime, StopError } from './errors';
 import { FindingFactory } from './findings';
 import type { Format } from './formats';
 import { bufferSource } from './io';
-import { inspectOdf } from './odf';
-import { inspectOoxml } from './ooxml';
+import { inspectCompound } from './ole';
+import { inspectPackage } from './package';
+import { inspectRtf } from './rtf';
 import { scoreFindings } from './score';
 import { type ByteSource, OfficeCategory as C, OfficeDetail as D, type DefuseFinding, type OfficeInspection, type OfficeLimits, type OfficeOptions, OfficeRisk } from './types';
 import { ZipArchive } from './zip';
@@ -18,6 +20,7 @@ const DEFAULT_LIMITS = {
   xmlEntityDepth: 16,
   xmlEntityExpansions: 100_000,
   xmlEntitySize: 16 * 1024 * 1024,
+  rtfDepth: 256,
 };
 
 type Limits = typeof DEFAULT_LIMITS & Pick<OfficeLimits, 'fileSize' | 'timeMs'>;
@@ -32,6 +35,7 @@ function resolveLimits(given: OfficeLimits = {}): Limits {
     xmlEntityDepth: given.xmlEntityDepth ?? DEFAULT_LIMITS.xmlEntityDepth,
     xmlEntityExpansions: given.xmlEntityExpansions ?? DEFAULT_LIMITS.xmlEntityExpansions,
     xmlEntitySize: given.xmlEntitySize ?? DEFAULT_LIMITS.xmlEntitySize,
+    rtfDepth: given.rtfDepth ?? DEFAULT_LIMITS.rtfDepth,
     fileSize: given.fileSize,
     timeMs: given.timeMs,
   };
@@ -82,6 +86,44 @@ function guarded(source: ByteSource): ByteSource & { failure?: unknown } {
   return g;
 }
 
+type Container = { kind: 'zip'; zip: ZipArchive } | { kind: 'cfb'; cfb: CompoundFile } | { kind: 'rtf' };
+
+const ambiguous = (reason: string) => new StopError(C.Package, D.AmbiguousFormat, `The file is ${reason}`, { reason });
+
+/**
+ * Reads the file's container. A file that starts with the compound file signature is read as one, and one that
+ * starts with {\rt is RTF, which is how Word tells them. The ZIP reader runs too, from the end: a file both read is
+ * ambiguous, since Office goes by the first bytes and a ZIP reader by the last. A compound file that does not read is
+ * a ZIP archive with data in front, if the ZIP reader read one. Word reads any file that starts with {\rt as RTF, so
+ * that does not fail.
+ */
+async function openContainer(src: ByteSource, size: number, limits: Limits, settings: RunSettings): Promise<Container> {
+  const head = await src.read(0, Math.min(8, size));
+  const cfbSignature = head.length === 8 && head.every((b, i) => b === CFB_SIGNATURE[i]);
+  const rtfSignature = Buffer.from(head.subarray(0, 4)).toString('latin1') === '{\\rt';
+  const probe =
+    cfbSignature || rtfSignature
+      ? await ZipArchive.open(src, limits, settings.deadline).catch((e: unknown) => {
+          if (e instanceof StopError) return undefined;
+          throw e;
+        })
+      : undefined;
+  if (rtfSignature) {
+    if (probe) throw ambiguous('both RTF and a ZIP archive');
+    return { kind: 'rtf' };
+  }
+  if (cfbSignature) {
+    try {
+      const cfb = await CompoundFile.open(src, settings, settings.deadline);
+      if (probe) throw ambiguous('both a compound file and a ZIP archive');
+      return { kind: 'cfb', cfb };
+    } catch (e) {
+      if (!probe || !(e instanceof StopError) || e.category !== C.Container) throw e;
+    }
+  }
+  return { kind: 'zip', zip: probe ?? (await ZipArchive.open(src, limits, settings.deadline)) };
+}
+
 /** Inspects an Office or OpenDocument file without changing it. The source is closed when the run ends. */
 export async function inspectOfficeSource(source: ByteSource, options: OfficeOptions = {}): Promise<OfficeInspection> {
   const limits = resolveLimits(options.limits);
@@ -89,32 +131,44 @@ export async function inspectOfficeSource(source: ByteSource, options: OfficeOpt
   const factory = new FindingFactory(options.actionOverrides);
   const findings: DefuseFinding[] = [];
   const src = guarded(source);
-  let ctx: RunContext | undefined;
-  try {
-    const size = await src.size();
-    if (limits.fileSize !== undefined && size > limits.fileSize) throw new StopError(C.Limit, D.FileSize, `${size} bytes`, { size, limit: limits.fileSize });
-    checkTime(deadline);
-    const zip = await ZipArchive.open(src, limits, deadline);
-    for (const n of zip.notes) findings.push(factory.make(C.Container, n.detail, undefined, { bytes: n.bytes }));
-    ctx = new RunContext(zip, factory, {
+  const settings: RunSettings = {
+    entries: limits.entries,
+    decompressedBytes: limits.decompressedBytes,
+    totalDecompressedBytes: limits.totalDecompressedBytes,
+    rtfDepth: limits.rtfDepth,
+    deadline,
+    password: options.password,
+  };
+  const ctx = new RunContext(
+    factory,
+    {
       depth: limits.xmlDepth,
       tokenSize: limits.xmlTokenSize,
       entityDepth: limits.xmlEntityDepth,
       entityExpansions: limits.xmlEntityExpansions,
       entitySize: limits.xmlEntitySize,
-    });
-    const contentTypes = zip.get('[Content_Types].xml');
-    const odf = zip.entries.some(e => e.name === 'mimetype') || zip.get('META-INF/manifest.xml') !== undefined;
-    if (contentTypes && odf)
-      throw new StopError(C.Package, D.AmbiguousFormat, 'The file has both [Content_Types].xml and an OpenDocument mimetype or manifest', { reason: 'OOXML and OpenDocument markers' });
-    if (contentTypes) await inspectOoxml(ctx, contentTypes);
-    else if (odf) await inspectOdf(ctx);
-    else throw new StopError(C.Package, D.Unrecognized, 'The archive has neither [Content_Types].xml nor an OpenDocument mimetype or manifest', { reason: 'a plain ZIP archive' });
+    },
+    settings,
+  );
+  try {
+    const size = await src.size();
+    if (limits.fileSize !== undefined && size > limits.fileSize) throw new StopError(C.Limit, D.FileSize, `${size} bytes`, { size, limit: limits.fileSize });
+    checkTime(deadline);
+    const container = await openContainer(src, size, limits, settings);
+    if (container.kind === 'rtf') await inspectRtf(ctx, src, size);
+    else if (container.kind === 'cfb') {
+      for (const n of container.cfb.notes) findings.push(factory.make(C.Container, n.detail, undefined, { bytes: n.bytes }));
+      await inspectCompound(ctx, container.cfb);
+    } else {
+      const zip = container.zip;
+      for (const n of zip.notes) findings.push(factory.make(C.Container, n.detail, undefined, { bytes: n.bytes }));
+      await inspectPackage(ctx.withZip(zip));
+    }
     findings.push(...ctx.findings);
     return finish(findings, options, false, ctx.format);
   } catch (e) {
     if (src.failure !== undefined) throw src.failure;
-    if (ctx) findings.push(...ctx.findings);
+    findings.push(...ctx.findings);
     if (e instanceof StopError) {
       findings.push(factory.make(e.category, e.detail, e.location ?? (typeof e.data?.name === 'string' ? e.data.name : undefined), { ...e.data, reason: e.data?.reason ?? e.message }));
     } else if ((e as { code?: unknown })?.code === 'DEFUSE_LIMIT') {
@@ -124,7 +178,7 @@ export async function inspectOfficeSource(source: ByteSource, options: OfficeOpt
       // Anything unexpected rejects the file rather than escaping as an exception.
       findings.push(factory.make(C.Package, D.Unreadable, undefined, { reason: String((e as Error)?.message ?? e).slice(0, 200) }));
     }
-    return finish(findings, options, true, ctx?.format);
+    return finish(findings, options, true, ctx.format);
   } finally {
     try {
       await source.close?.();
