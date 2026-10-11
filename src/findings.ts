@@ -34,6 +34,7 @@ def(C.Container, D.BadExtraField, 'reject', 0, 'An extra field block does not pa
 def(C.Container, D.DataError, 'reject', 0, "An entry's data does not match its declared size or checksum<: {name}|>");
 def(C.Container, D.LeadingBytes, 'strip', 10, 'Data before the first entry of the archive');
 def(C.Container, D.HiddenData, 'strip', 20, 'Data in the file that no entry or stream covers');
+def(C.Container, D.HiddenEntry, 'strip', 40, 'A local file header the central directory does not list, which a reader that walks the file in order extracts<: at offset {offset}|>');
 def(C.Container, D.TrailingBytes, 'strip', 10, 'Data after the end of the archive or compound file');
 def(C.Container, D.BadHeader, 'reject', 0, 'The compound file header is invalid<: {reason}|>');
 def(C.Container, D.BrokenChain, 'reject', 0, 'A sector chain of the compound file runs into a free or reserved sector');
@@ -57,18 +58,20 @@ def(C.Limit, D.XmlEntityDepth, 'reject', 0, 'An XML part exceeds the entity nest
 def(C.Limit, D.XmlEntityExpansions, 'reject', 0, 'The file exceeds the entity expansion limit');
 def(C.Limit, D.XmlEntitySize, 'reject', 0, 'The file exceeds the expanded entity size limit');
 def(C.Limit, D.RtfDepth, 'reject', 0, 'The RTF file exceeds the group nesting limit');
+def(C.Limit, D.NestingDepth, 'reject', 0, 'The file sits deeper in the upload than the nesting limit allows');
 def(C.Limit, D.Time, 'reject', 0, 'The file exceeds the time limit');
 // PACKAGE
 def(C.Package, D.Unrecognized, 'reject', 0, 'The file is not a recognized Office or OpenDocument file');
 def(C.Package, D.AmbiguousFormat, 'reject', 0, 'The file can be read as more than one format');
 def(C.Package, D.Unreadable, 'reject', 0, 'The file could not be read');
+def(C.Package, D.UnreadableBody, 'strip', 10, "An Outlook message's RTF body does not decompress<: {stream}|>");
 def(C.Package, D.DuplicateEntry, 'reject', 0, 'The package names one thing twice, and readers may pick either');
 def(C.Package, D.UntypedPart, 'strip', 10, 'A part has no content type<: {part}|>');
 def(C.Package, D.UnreferencedPart, 'strip', 0, 'A part nothing in the package refers to<: {part}|>');
 def(C.Package, D.OdfLayout, 'strip', 10, 'The OpenDocument package layout is irregular<: {reason}|>');
 // ENCRYPTED
 def(C.Encrypted, D.PasswordRequired, 'reject', 0, 'The document is encrypted with a password');
-def(C.Encrypted, D.DefaultPassword, 'strip', 10, 'The file is encrypted with VelvetSweatshop, the password Excel opens it with without asking');
+def(C.Encrypted, D.DefaultPassword, 'strip', 10, 'The file is encrypted with <{password}|VelvetSweatshop>, the password <{application}|Excel> opens it with without asking');
 def(C.Encrypted, D.UserPassword, 'strip', 0, 'The file was decrypted with the supplied password');
 def(C.Encrypted, D.Rc4_40, 'info', 0, 'Encryption is RC4 with a 40-bit key');
 def(C.Encrypted, D.Rc4_128, 'info', 0, 'Encryption is RC4 with a 128-bit key');
@@ -76,6 +79,7 @@ def(C.Encrypted, D.Rc4Other, 'info', 0, 'Encryption is RC4 with a <{bits}|longer
 def(C.Encrypted, D.Aes128, 'info', 0, 'Encryption is AES with a 128-bit key');
 def(C.Encrypted, D.Aes192, 'info', 0, 'Encryption is AES with a 192-bit key');
 def(C.Encrypted, D.Aes256, 'info', 0, 'Encryption is AES with a 256-bit key');
+def(C.Encrypted, D.XorObfuscation, 'info', 0, 'Encryption is XOR obfuscation');
 def(C.Encrypted, D.UnsupportedAlgorithm, 'reject', 0, 'The file is encrypted with an algorithm office-defuse does not decrypt<: {algorithm}|>');
 // MACRO
 def(C.Macro, D.VbaProject, 'strip', 70, 'The document holds VBA macros');
@@ -93,6 +97,7 @@ def(C.Ui, D.Callback, 'strip', 30, 'The custom ribbon calls a macro<: {callback}
 def(C.Ui, D.OdfConfiguration, 'strip', 10, 'The document carries its own menu, toolbar or key settings, which can call macros');
 // ACTION
 def(C.Action, D.RunProgram, 'strip', 80, 'A click or hover runs a program or opens a file');
+def(C.Action, D.SubmitForm, 'strip', 40, 'A form sends its data to a URL<: {target}|>');
 def(C.Action, D.OleVerb, 'strip', 40, 'A click or hover activates an embedded object');
 def(C.Action, D.ObjectUpdate, 'strip', 50, 'An embedded object updates itself as the document opens, which starts the program it belongs to');
 // DDE
@@ -111,6 +116,7 @@ def(C.External, D.Include, 'strip', 40, 'Content is included from <{target}|anot
 def(C.External, D.Workbook, 'strip', 30, 'Formulas read another workbook at <{target}|another location>');
 def(C.External, D.Reload, 'strip', 40, 'The document loads <{target}|another address> on its own after a delay');
 def(C.External, D.Other, 'strip', 30, 'The document refers to <{target}|something outside the file>');
+def(C.External, D.DataConnection, 'strip', 40, 'A data connection loads from outside the file<: {target}|>');
 def(C.External, D.LocalFile, 'strip', 5, 'The document refers to a local file<: {target}|>');
 // LINK
 def(C.Link, D.Safe, 'info', 0, 'Web or email link');
@@ -124,6 +130,9 @@ def(C.Link, D.IpHost, 'strip', 40, 'A link points at a raw IP address');
 def(C.Link, D.LookalikeHost, 'strip', 40, "A link's host uses punycode or mixed scripts");
 def(C.Link, D.EncodedHost, 'strip', 40, "A link's host is percent-encoded");
 def(C.Link, D.Relative, 'strip', 30, "A relative link, which resolves against the file's own location");
+def(C.Link, D.TextMismatch, 'strip', 40, "A link's text or tooltip names a different site than it opens");
+def(C.External, D.Formula, 'strip', 40, 'A formula fetches from outside the file when it is calculated<: {function}|>');
+def(C.Macro, D.Formula, 'strip', 60, 'A formula runs code outside the file when it is calculated<: {function}|>');
 // EMBEDDED
 def(C.Embedded, D.OleObject, 'strip', 40, 'An embedded OLE object<, which holds the file {fileName}|>');
 def(C.Embedded, D.Package, 'strip', 30, 'An embedded document<: {contentType}|>');
@@ -132,8 +141,14 @@ def(C.Embedded, D.Applet, 'strip', 60, 'An embedded Java applet');
 def(C.Embedded, D.Plugin, 'strip', 50, 'An embedded browser plug-in object');
 def(C.Embedded, D.Equation, 'strip', 70, 'An Equation Editor 3.0 object, which CVE-2017-11882 and CVE-2018-0802 exploit');
 def(C.Embedded, D.Attachment, 'strip', 30, '<An attached file "{name}"|An attached file> (<{type}|unknown type>)');
+def(C.Embedded, D.PluginPassed, 'info', 20, 'An embedded file was kept by <plugin {plugin}|a plugin> with nothing removed');
+def(C.Embedded, D.PluginScrubbed, 'info', 10, 'An embedded file was cleaned and kept by <plugin {plugin}|a plugin>');
+def(C.Embedded, D.PluginFailed, 'strip', 0, '<Plugin {plugin}|A plugin> failed, so the embedded file was removed');
+def(C.Embedded, D.PluginRemoved, 'strip', 0, 'An embedded file was removed by <plugin {plugin}|a plugin>');
 // CONTROL
 def(C.Control, D.ActiveX, 'strip', 50, 'An ActiveX control');
+// PROCESSING
+def(C.Processing, D.VerificationFailed, 'reject', 0, 'The defused output did not pass its own inspection, so nothing was written');
 
 /** The built-in spec for a kind of finding, or undefined for a kind office-defuse does not make, such as one from another package. */
 export function findingSpec(category: string, detail: string): Spec | undefined {
@@ -161,7 +176,8 @@ const shown = (v: string | number) => String(v).replace(/[\p{Cc}\p{Cf}]/gu, '?')
 export class FindingFactory {
   constructor(private readonly overrides: OfficeActionOverride[] = []) {}
 
-  private actionFor(category: C, detail: D): OfficeFindingAction {
+  /** The action of a kind of finding, after the caller's overrides. */
+  actionFor(category: C, detail: D): OfficeFindingAction {
     const exact = this.overrides.find(o => o.category === category && o.detail === detail);
     if (exact) return exact.action;
     const byCategory = this.overrides.find(o => o.category === category && o.detail === undefined);

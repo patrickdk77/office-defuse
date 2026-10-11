@@ -1,4 +1,3 @@
-import * as crypto from 'node:crypto';
 import { expect } from 'chai';
 import { inspectOffice } from '../src';
 import { ODF_FORMATS, OOXML_FORMATS } from '../src/formats';
@@ -85,7 +84,8 @@ describe('format detection', () => {
 
   const refused: Array<[string, () => Promise<Buffer>, string]> = [
     ['OOXML and ODF markers together', async () => fixture('docs', 'ambiguous.docx'), 'PACKAGE/AMBIGUOUS_FORMAT'],
-    ['bytes that are not a ZIP', async () => crypto.randomBytes(5000), 'CONTAINER/NOT_ZIP'],
+    // Fixed bytes, not random ones, which start with "<" one time in 256 and are then read as flat XML.
+    ['bytes that are not a ZIP', async () => Buffer.from(Array.from({ length: 5000 }, (_, i) => (i * 131 + 7) % 251)), 'CONTAINER/NOT_ZIP'],
     [
       'a main relationship to a missing part',
       () =>

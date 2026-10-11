@@ -1,5 +1,6 @@
-export { inspectOffice, inspectOfficeSource } from './engine';
+export { disarmOffice, disarmOfficeSource, inspectOffice, inspectOfficeSource } from './engine';
 export { allFindingSpecs } from './findings';
-export { bufferSource, fileSource } from './io';
+export { bufferSink, bufferSource, fileSink, fileSource, writableSink } from './io';
+export { officePlugin } from './plugins';
 export { COMBINATIONS, DEFAULT_BANDS, scoreFindings } from './score';
 export * from './types';

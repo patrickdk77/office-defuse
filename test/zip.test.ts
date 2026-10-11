@@ -1,6 +1,7 @@
 import * as zlib from 'node:zlib';
 import { expect } from 'chai';
-import { inspectOffice } from '../src';
+import { disarmOffice, inspectOffice } from '../src';
+import { crc32 } from '../src/crc32';
 import { StopError } from '../src/errors';
 import { bufferSource, Reader } from '../src/io';
 import { ZipArchive } from '../src/zip';
@@ -131,6 +132,9 @@ describe('ZIP reader', () => {
     ['an empty entry name', () => rawZip([...docx(), { name: '', data: 'x' }]), 'CONTAINER/UNSAFE_NAME'],
     ['an entry name with a control character', () => rawZip([...docx(), { name: 'word/a\u0001.xml', data: 'x' }]), 'CONTAINER/UNSAFE_NAME'],
     ['an empty path segment', () => rawZip([...docx(), { name: 'word//a.xml', data: 'x' }]), 'CONTAINER/UNSAFE_NAME'],
+    ['a segment of two dots and a space, which Windows reads as ..', () => rawZip([...docx(), { name: 'word/.. /a.xml', data: 'x' }]), 'CONTAINER/UNSAFE_NAME'],
+    ['a segment of three dots', () => rawZip([...docx(), { name: 'word/.../a.xml', data: 'x' }]), 'CONTAINER/UNSAFE_NAME'],
+    ['two names that match once Windows drops trailing dots', () => rawZip([...docx(), { name: 'word/a.xml.', data: 'x' }, { name: 'word/a.xml', data: 'y' }]), 'CONTAINER/DUPLICATE_NAME'],
     ['a name flagged UTF-8 that is not valid UTF-8', () => rawZip([...docx(), { name: Buffer.from([0x61, 0xff]), data: 'x', flags: 0x0800 }]), 'CONTAINER/NAME_ENCODING'],
     [
       'an Info-ZIP Unicode path field of an unknown version',
@@ -264,7 +268,6 @@ describe('ZIP reader', () => {
 
   const noted: Array<[string, string, number]> = [
     ['leading-bytes.docx', 'CONTAINER/LEADING_BYTES', 64],
-    ['hidden-data.docx', 'CONTAINER/HIDDEN_DATA', 46],
     ['trailing-bytes.docx', 'CONTAINER/TRAILING_BYTES', 40],
   ];
   for (const [name, k, bytes] of noted) {
@@ -273,6 +276,148 @@ describe('ZIP reader', () => {
       expect({ status: r.status, format: r.format, kinds: kinds(r), data: r.findings[0].data }).to.deep.equal({ status: 'strippable', format: 'docx', kinds: [k], data: { bytes } });
     });
   }
+
+  it('reports a local header between entries as a hidden entry as well as hidden data, and the copy leaves it out', async () => {
+    const r = await inspectOffice(fixture('zip', 'hidden-data.docx'));
+    expect([r.status, kinds(r)]).to.deep.equal(['strippable', ['CONTAINER/HIDDEN_DATA', 'CONTAINER/HIDDEN_ENTRY']]);
+    // The hidden header sits right before word/document.xml's own local header.
+    const listed = await ZipArchive.open(bufferSource(fixture('zip', 'hidden-data.docx')), LIMITS);
+    expect(of(r, 'CONTAINER/HIDDEN_ENTRY')[0].data).to.deep.equal({ bytes: 46, offset: must(listed.get('word/document.xml'), 'entry').localOffset - 46 });
+    const d = await disarmOffice(fixture('zip', 'hidden-data.docx'));
+    const out = await ZipArchive.open(bufferSource(must(d.bytes, 'output')), LIMITS);
+    expect([d.status, out.notes, out.entries.map(e => e.name)]).to.deep.equal(['defused', [], ['[Content_Types].xml', '_rels/.rels', 'word/document.xml']]);
+    // Bytes between entries that hold no local header are hidden data and nothing more.
+    const junk = await ZipArchive.open(bufferSource(rawZip(docxWith({ before: Buffer.from('not a header, only bytes') }))), LIMITS);
+    expect(junk.notes).to.deep.equal([{ detail: 'HIDDEN_DATA', bytes: 24 }]);
+  });
+
+  /** A local header and its data, as a streaming unzipper reads one. */
+  const localEntry = (name: string, data: string) => {
+    const n = Buffer.from(name);
+    const d = Buffer.from(data);
+    return Buffer.concat([le.u32(0x04034b50), le.u16(20), le.u16(0), le.u16(0), le.u16(0), le.u16(0x21), le.u32(crc32(d)), le.u32(d.length), le.u32(d.length), le.u16(n.length), le.u16(0), n, d]);
+  };
+  /** A stored entry with a data descriptor, whose data is `data`. */
+  const storedWithDescriptor = (name: string, data: Uint8Array): RawEntry => ({ name, data, method: 0, flags: 8, local: { crc: 0, csize: 0, usize: 0 }, after: descriptorOf(data, data) });
+
+  it('reports a local header inside a stored entry that has a data descriptor, where a streaming unzipper ends the entry', async () => {
+    const data = Buffer.concat([Buffer.from('head '), localEntry('smuggled.txt', 'payload'), Buffer.from(' tail')]);
+    const z = await ZipArchive.open(bufferSource(rawZip([...docx(), storedWithDescriptor('word/blob.bin', data)])), LIMITS);
+    const blob = must(z.get('word/blob.bin'), 'entry');
+    expect(z.notes).to.deep.equal([{ detail: 'HIDDEN_ENTRY', bytes: data.length - 5, offset: blob.dataOffset + 5 }]);
+    // The same entry without a local header in it is read as it is.
+    const plain = await ZipArchive.open(bufferSource(rawZip([...docx(), storedWithDescriptor('word/blob.bin', Buffer.from('nothing inside'))])), LIMITS);
+    expect(plain.notes).to.deep.equal([]);
+  });
+
+  it('writes no data descriptors, so a reader that walks the copy finds the entries the directory lists', async () => {
+    const d = await disarmOffice(rawZip(docxWith({ method: 0, flags: 8, local: { crc: 0, csize: 0, usize: 0 }, after: descriptorOf(DOC, Buffer.from(DOC)) })));
+    const out = await ZipArchive.open(bufferSource(must(d.bytes, 'output')), LIMITS);
+    expect(out.entries.map(e => e.flags & 8)).to.deep.equal([0, 0, 0]);
+  });
+
+  it('deflates a stored entry that would put a PDF header in the first 1024 bytes of the copy', async () => {
+    const xml = wordXml('<!-- %PDF-1.7 --><w:p/>');
+    const d = await disarmOffice(rawZip(docxWith({ data: xml, method: 0 })));
+    const out = Buffer.from(must(d.bytes, 'output'));
+    expect(out.subarray(0, 1024).includes('%PDF-')).to.equal(false);
+    const z = await ZipArchive.open(bufferSource(out), LIMITS);
+    const doc = must(z.get('word/document.xml'), 'entry');
+    expect([doc.method, (await contents(z, 'word/document.xml')).toString()]).to.deep.equal([8, xml]);
+    // A stored entry without a PDF header is copied as it is.
+    const plain = await disarmOffice(rawZip(docxWith({ method: 0 })));
+    const z2 = await ZipArchive.open(bufferSource(must(plain.bytes, 'output')), LIMITS);
+    expect(must(z2.get('word/document.xml'), 'entry').method).to.equal(0);
+  });
+
+  it('keeps a PDF header out of the first 1024 bytes when a part that goes moves a name or compressed bytes there', async () => {
+    const z = await ZipArchive.open(bufferSource(fixture('docs', 'vba.docm')), LIMITS);
+    const all: RawEntry[] = [];
+    for (const e of z.entries) all.push({ name: e.name, data: await contents(z, e.name) });
+    const named = (n: string) =>
+      must(
+        all.find(e => e.name === n),
+        n,
+      );
+    // The settings part with a PDF header in a comment, deflated at level 0, which writes stored blocks.
+    const settings = Buffer.from(String(named('word/settings.xml').data).replace('?>', '?><!-- %PDF-1.7 -->'));
+    // The styles part named with a PDF header, and the relationship and content type that name it.
+    const rename = (e: RawEntry): RawEntry => {
+      if (e.name === 'word/styles.xml') return { ...e, name: 'word/%PDF-1.xml' };
+      if (e.name === '[Content_Types].xml' || e.name === 'word/_rels/document.xml.rels') return { ...e, data: String(e.data).replace(/styles\.xml/g, '%PDF-1.xml') };
+      return e;
+    };
+    const isVba = (e: RawEntry) => /vba/i.test(String(e.name));
+    const cases: Array<[string, RawEntry[], string, string]> = [
+      [
+        'compressed bytes',
+        all.map(e => (e.name === 'word/settings.xml' ? { ...e, data: settings, payload: zlib.deflateRawSync(settings, { level: 0 }) } : e)),
+        'word/settings.xml',
+        settings.toString(),
+      ],
+      ['a name', all.map(rename), 'word/%PDF-1.xml', String(named('word/styles.xml').data)],
+    ];
+    for (const [what, entries, name, text] of cases) {
+      // The VBA parts go first, stored, then the entry with the PDF header, so dropping them moves it to the start.
+      const target = must(
+        entries.find(e => e.name === name),
+        name,
+      );
+      const input = rawZip([...entries.filter(isVba).map(e => ({ ...e, method: 0 })), target, ...entries.filter(e => !isVba(e) && e !== target)]);
+      expect(input.subarray(0, 1028).includes('%PDF-'), what).to.equal(false);
+      const d = await disarmOffice(input);
+      expect(d.status, what).to.equal('defused');
+      const out = Buffer.from(must(d.bytes, 'output'));
+      expect(out.subarray(0, 1028).includes('%PDF-'), what).to.equal(false);
+      expect((await contents(await ZipArchive.open(bufferSource(out), LIMITS), name)).toString(), what).to.equal(text);
+    }
+  });
+
+  it('refuses names that one file system folds together: a sharp s and ss, and a ligature and its letters', async () => {
+    const sharp = `word/stra${String.fromCodePoint(0xdf)}e.xml`;
+    const ligature = `word/${String.fromCodePoint(0xfb01)}le.xml`;
+    expect(await refusal(rawZip([...docx(), { name: sharp, data: 'x', flags: 0x800 }, { name: 'word/STRASSE.xml', data: 'y' }]))).to.equal('CONTAINER/DUPLICATE_NAME');
+    expect(await refusal(rawZip([...docx(), { name: ligature, data: 'x', flags: 0x800 }, { name: 'word/file.xml', data: 'y' }]))).to.equal('CONTAINER/DUPLICATE_NAME');
+  });
+
+  it('keeps entries named after Object.prototype members as entries, and leaves the prototype alone', async () => {
+    const before = Object.getOwnPropertyNames(Object.prototype).sort();
+    const names = ['__proto__', 'constructor', 'toString', 'hasOwnProperty', 'prototype'];
+    const zip = rawZip([...docx(), ...names.map(name => ({ name, data: name }))]);
+    const z = await ZipArchive.open(bufferSource(zip), LIMITS);
+    for (const name of names) expect((await contents(z, name)).toString()).to.equal(name);
+    const r = await inspectOffice(zip);
+    expect(kinds(r).filter(k => k.startsWith('FORMAT/') || k.startsWith('PROCESSING/'))).to.deep.equal([]);
+    expect(Object.getOwnPropertyNames(Object.prototype).sort()).to.deep.equal(before);
+  });
+
+  it('stops inflating an entry that declares a size of 0 at its first byte', async () => {
+    const big = Buffer.alloc(4 * 1024 * 1024, 1);
+    const z = await ZipArchive.open(bufferSource(rawZip([{ name: 'a.bin', data: big, local: { usize: 0 }, central: { usize: 0 } }])), LIMITS);
+    let seen = 0;
+    const e = await failure(
+      (async () => {
+        for await (const c of z.read(z.entries[0])) seen += c.length;
+      })(),
+    );
+    expect([(e as StopError).detail, seen]).to.deep.equal(['DATA_ERROR', 0]);
+  });
+
+  it('writes no file modes, so setuid, setgid and sticky bits from the upload never reach the copy', async () => {
+    const central = le.u32(0x02014b50);
+    // Made by Unix, with mode 0104755 and then 0127777 in the high half of every entry's external attributes.
+    for (const mode of [0o104755, 0o127777]) {
+      const patched = rawZip(docx());
+      for (let p = patched.indexOf(central); p >= 0; p = patched.indexOf(central, p + 1)) {
+        patched.writeUInt16LE(0x031e, p + 4);
+        patched.writeUInt32LE((mode * 0x10000) >>> 0, p + 38);
+      }
+      const out = Buffer.from(must((await disarmOffice(patched)).bytes, 'output'));
+      const attrs: number[] = [];
+      for (let p = out.indexOf(central); p >= 0; p = out.indexOf(central, p + 1)) attrs.push(out.readUInt16LE(p + 4) >> 8, out.readUInt32LE(p + 38));
+      expect(attrs).to.deep.equal([0, 0, 0, 0, 0, 0]);
+    }
+  });
 
   it('reports bytes before the directory of an archive with no entries as leading bytes', async () => {
     const z = await ZipArchive.open(bufferSource(rawZip([], { prefix: Buffer.from('stub') })), LIMITS);

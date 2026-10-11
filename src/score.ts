@@ -22,7 +22,7 @@ export const COMBINATIONS: Combination[] = [
   {
     name: 'code with data hidden in the archive',
     weight: 10,
-    test: has => runsCode(has) && (has(C.Container, D.LeadingBytes) || has(C.Container, D.HiddenData) || has(C.Container, D.TrailingBytes)),
+    test: has => runsCode(has) && (has(C.Container, D.LeadingBytes) || has(C.Container, D.HiddenData) || has(C.Container, D.HiddenEntry) || has(C.Container, D.TrailingBytes)),
   },
 ];
 

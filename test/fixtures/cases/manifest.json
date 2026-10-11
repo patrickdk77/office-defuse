@@ -541,8 +541,8 @@
   },
   {
     "file": "xps-document.xps",
-    "issue": "An XPS document, which this version does not read.",
-    "expected": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["PACKAGE/UNRECOGNIZED"]},
+    "issue": "An XPS document, which 0.1.1 did not read.",
+    "expected": {"status":"clean","risk":"NONE","format":"xps","kinds":[]},
     "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["PACKAGE/UNRECOGNIZED"]}
   },
   {

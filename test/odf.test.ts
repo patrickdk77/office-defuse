@@ -219,13 +219,19 @@ describe('OpenDocument rules', () => {
     expect([kinds(rootless), rootless.findings[1].data?.mediaType]).to.deep.equal([['PACKAGE/ODF_LAYOUT', 'PACKAGE/UNRECOGNIZED'], '']);
   });
 
-  it('reports links in form controls and Impress events that open documents or run programs', async () => {
+  it('reports links in form controls and Impress events that open documents or run programs, and where a form sends its fields', async () => {
     const r = await inspectOffice(
       await presentation(
         '<draw:rect><office:event-listeners><presentation:event-listener presentation:action="show" xlink:href="https://example.com/next"/><presentation:event-listener presentation:action="execute" xlink:href="calc.exe"/><presentation:event-listener presentation:action="verb"/><presentation:event-listener xlink:href="#slide2"/><presentation:event-listener presentation:action="next-page"/></office:event-listeners></draw:rect><form:button xlink:href="file:///etc/passwd"/><form:form xlink:href="https://example.com/submit"/>',
       ),
     );
-    expect(r.findings.map(f => `${f.category}/${f.detail} ${f.data?.action ?? ''}`)).to.deep.equal(['LINK/SAFE show', 'ACTION/RUN_PROGRAM execute', 'ACTION/OLE_VERB verb', 'LINK/FILE_URL ']);
+    expect(r.findings.map(f => `${f.category}/${f.detail} ${f.data?.action ?? ''}`)).to.deep.equal([
+      'LINK/SAFE show',
+      'ACTION/RUN_PROGRAM execute',
+      'ACTION/OLE_VERB verb',
+      'LINK/FILE_URL ',
+      'ACTION/SUBMIT_FORM ',
+    ]);
   });
 
   it('leaves an embedded database connection alone and reports one to a server', async () => {

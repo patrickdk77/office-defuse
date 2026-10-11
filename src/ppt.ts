@@ -1,10 +1,12 @@
 import * as zlib from 'node:zlib';
 import { type CfbEntry, CompoundFile } from './cfb';
+import { decideContained } from './contained';
 import { clip, type RunContext } from './context';
 import { checkTime, StopError } from './errors';
-import { Reader } from './io';
+import { bufferSource, chunksOf, Reader } from './io';
 import { isFragment } from './links';
 import { compoundRules, nestedNotes } from './objects';
+import { unlockPresentation } from './offcrypto';
 import { utf16 } from './oleobj';
 import { type ByteSource, OfficeCategory as C, OfficeDetail as D } from './types';
 
@@ -21,6 +23,7 @@ const T = {
   cString: 0x0fba,
   exHyperlink: 0x0fd7,
   exHyperlinkAtom: 0x0fd3,
+  cryptSession: 0x2f14,
 };
 /** ExVideoContainer, ExMIDIAudioContainer and ExWAVAudioLinkContainer, whose path names a file outside the presentation. */
 const MEDIA_LINKS = new Set([0x1005, 0x100d, 0x1010]);
@@ -51,15 +54,18 @@ interface Storage {
  */
 export async function powerPointRules(ctx: RunContext, cfb: CompoundFile, stream: CfbEntry): Promise<void> {
   const location = stream.name;
-  const source = cfb.source(stream);
-  const reader = new Reader(source, stream.size, 16384, 8);
+  let source = cfb.source(stream);
+  let reader = new Reader(source, stream.size, 16384, 8);
   const persist = new Map<number, number>();
   const current = cfb.child(cfb.root, 'Current User');
   if (current?.kind === 'stream') {
     const cu = await cfb.source(current).read(0, 24);
     if (cu.length >= 20 && header(cu).type === T.currentUserAtom) {
-      if (u32(cu, 12) === ENCRYPTED_TOKEN) throw new StopError(C.Encrypted, D.PasswordRequired, 'The presentation is encrypted', { stream: location });
       await readPersist(reader, stream.size, u32(cu, 16), persist, ctx.settings.deadline);
+      if (u32(cu, 12) === ENCRYPTED_TOKEN) {
+        source = await decryptPresentation(ctx, reader, stream, u32(cu, 16), persist);
+        reader = new Reader(source, stream.size, 16384, 8);
+      }
     }
   }
 
@@ -103,6 +109,35 @@ export async function powerPointRules(ctx: RunContext, cfb: CompoundFile, stream
     const role = id !== undefined && vba.has(id) ? 'vba' : id !== undefined && roles.get(id) === 2 ? 'control' : 'object';
     await storageRules(ctx, source, s, role, `${location}, offset ${s.offset}`);
   }
+}
+
+/**
+ * The PowerPoint Document stream of an encrypted presentation, decrypted (MS-PPT 2.3.7). The current edit names the
+ * persist object that holds the CryptSession10Container, whose data is an RC4 CryptoAPI EncryptionHeader. Each other
+ * persist object, its record header included, is RC4 with the key of block number its persist id. The edits and
+ * persist directories were never encrypted.
+ */
+async function decryptPresentation(ctx: RunContext, reader: Reader, stream: CfbEntry, edit: number, persist: Map<number, number>): Promise<ByteSource> {
+  const required = (reason: string) => new StopError(C.Encrypted, D.PasswordRequired, `The presentation is encrypted: ${reason}`, { stream: stream.name, reason });
+  const u = await reader.read(edit, 40);
+  const sessionAt = u.length >= 40 && header(u).type === T.userEditAtom ? persist.get(u32(u, 36)) : undefined;
+  if (sessionAt === undefined || sessionAt + 8 > stream.size) throw required('the current edit names no CryptSession10Container');
+  const h = header(await reader.read(sessionAt, 8));
+  if (h.type !== T.cryptSession) throw required('the current edit names no CryptSession10Container');
+  const keyOf = unlockPresentation(ctx, await reader.read(sessionAt + 8, Math.min(h.length, 65536)), stream.name);
+  if (stream.size > ctx.settings.decompressedBytes)
+    throw new StopError(C.Limit, D.DecompressedSize, `The encrypted stream ${stream.name} is ${stream.size} bytes`, { name: stream.name, size: stream.size, limit: ctx.settings.decompressedBytes });
+  const copy = Buffer.from(await reader.read(0, stream.size));
+  for (const [id, offset] of persist) {
+    checkTime(ctx.settings.deadline);
+    if (offset === sessionAt || offset + 8 > copy.length) continue;
+    const rc4 = keyOf(id);
+    const head = rc4.crypt(copy.subarray(offset, offset + 8));
+    const length = Math.min(copy.length - offset - 8, u32(head, 4));
+    copy.set(head, offset);
+    copy.set(rc4.crypt(copy.subarray(offset + 8, offset + 8 + length)), offset + 8);
+  }
+  return bufferSource(copy);
 }
 
 /** Reads the persist directories of the current edit and every edit before it. Newer entries win. */
@@ -162,7 +197,11 @@ async function storageRules(ctx: RunContext, source: ByteSource, s: Storage, rol
   }
   nestedNotes(ctx, cfb, location);
   if (role === 'control') ctx.report(C.Control, D.ActiveX, location, { storage: location, ...(cfb.root.clsid === '00000000-0000-0000-0000-000000000000' ? {} : { clsid: cfb.root.clsid }) });
-  await compoundRules(ctx, cfb, location, role === 'object');
+  // An object's storage goes to the plugins as the compound file it is. The rewrite cannot change the presentation's
+  // records, so only a plugin that passes the object keeps it in the output.
+  const size = await inner.size();
+  const decision = role === 'object' ? await decideContained(ctx, { location, chunks: () => chunksOf(inner, size) }) : undefined;
+  await compoundRules(ctx, cfb, location, role === 'object', undefined, decision);
 }
 
 function unreadable(ctx: RunContext, role: 'vba' | 'control' | 'object', location: string, reason: string): void {

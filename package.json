@@ -1,6 +1,6 @@
 {
   "name": "@patrickdk77/office-defuse",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Inspect Office and OpenDocument files for VBA and Excel 4.0 macros, LibreOffice Basic and scripts, DDE, external templates and links, embedded OLE objects and ActiveX controls, and score the risk. Strict ZIP and XML readers, bounded memory, no runtime dependencies.",
   "license": "MIT",
   "author": "patrickdk77",
@@ -15,6 +15,9 @@
       "require": "./dist/index.js"
     },
     "./package.json": "./package.json"
+  },
+  "bin": {
+    "office-defuse": "dist/cli.js"
   },
   "files": [
     "dist",

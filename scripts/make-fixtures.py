@@ -3,6 +3,7 @@
 #
 #   python3 -I scripts/make-fixtures.py
 #   python3 -I scripts/make-fixtures.py cases    # cases/ alone, which needs only Python
+#   python3 -I scripts/make-fixtures.py media    # media/ alone, which needs only Python
 #
 # lo/     LibreOffice exports of the flat ODF sources below, as LibreOffice writes them, in OOXML, ODF, the binary
 #         formats and RTF.
@@ -14,6 +15,8 @@
 #         bytes.
 # rtf/    RTF files with objects, fields, links and the obfuscations rtfobj documents.
 # cfb/    Compound files that each break one rule of MS-CFB.
+# media/  Packages and RTF files holding pictures, which go to the file plugins, beside the printer settings and
+#         obfuscated fonts of the format itself, which do not.
 # cases/  One package for each behavior the corpus census found. A rebuild writes the same bytes.
 #         manifest.json, kept by hand, gives each file's issue and what office-defuse reports.
 #
@@ -1399,31 +1402,51 @@ def sttb_unicode(strings):
     return struct.pack('<HHH', 0xFFFF, len(strings), 0) + b''.join(struct.pack('<H', len(s)) + s.encode('utf-16-le') for s in strings)
 
 
-def word_doc(text, template=None, dot=False, encrypted=False, compressed=False, extra=(), clx=None, assoc=None, table='1Table', **cfb_options):
-    """A Word 97 document whose text is `text`, one piece, stored as UTF-16 or 8-bit. `template` goes in SttbfAssoc."""
+def word_doc(text, template=None, dot=False, encrypted=False, compressed=False, extra=(), clx=None, assoc=None, table='1Table', streams=False, table_prefix=b'', flags_extra=0, **cfb_options):
+    """A Word 97 document whose text is `text`, one piece, stored as UTF-16 or 8-bit. `template` goes in SttbfAssoc.
+    `table_prefix` stands at the start of the table stream, the FIB's offsets past it, and `streams` returns the
+    WordDocument stream, the table stream and the Data stream instead of a compound file."""
     text_at = 1024
     stored = text.encode('latin-1') if compressed else text.encode('utf-16-le')
     clx = clx if clx is not None else b'\x02' + struct.pack('<I', 4 * 2 + 8) + struct.pack('<II', 0, len(text)) + struct.pack('<HIH', 0, (text_at * 2) | 0x40000000 if compressed else text_at, 0)
-    data = bytearray(clx)
-    pairs = {33: (0, len(clx))}
+    data = bytearray(table_prefix + clx)
+    pairs = {33: (len(table_prefix), len(clx))}
     if template is not None or assoc is not None:
         assoc = assoc if assoc is not None else sttb_unicode(['', template])
         pairs[32] = (len(data), len(assoc))
         data += assoc
-    flags = (1 if dot else 0) | (0x0100 if encrypted else 0) | (0x0200 if table == '1Table' else 0)
+    flags = (1 if dot else 0) | (0x0100 if encrypted else 0) | (0x0200 if table == '1Table' else 0) | flags_extra
     fib = fib97(len(text), pairs, flags)
     word = fib.ljust(text_at, b'\0') + stored
+    if streams:
+        return word.ljust(4096, b'\0'), bytes(data), b''
     return cfb([Stream('WordDocument', word.ljust(4096, b'\0')), Stream(table, bytes(data)), Stream('\x01CompObj', comp_obj('Microsoft Word 97-2004 Document', 'Word.Document.8'))] + list(extra),
                root_clsid='00020906-0000-0000-C000-000000000046', **cfb_options)
 
 
-def word6_doc(text, macros=0, dot=False, encrypted=False):
-    """A Word 6.0 document: its 8-bit text from fcMin to fcMac. `macros` sets the length of the macro table, at FIB offset 0x11C."""
+def word6_doc(text, macros=0, dot=False, encrypted=False, pieces=None):
+    """A Word 6.0 document: its 8-bit text from fcMin to fcMac. `macros` sets the length of the macro table, at FIB offset 0x11C.
+    `pieces` makes it a file saved fast: the pieces, in reading order, are stored last first, and a piece table at
+    fcClx (FIB offset 0x160) puts them back in order."""
     fib = bytearray(0x300)
-    struct.pack_into('<HHHHHH', fib, 0, 0xA5DC, 0x65, 0, 0x0409, 0, (1 if dot else 0) | (0x0100 if encrypted else 0))
-    struct.pack_into('<II', fib, 0x18, 0x300, 0x300 + len(text))
-    struct.pack_into('<II', fib, 0x118, 0x300 + len(text), macros)
-    body = bytes(fib) + text.encode('latin-1') + bytes(macros)
+    struct.pack_into('<HHHHHH', fib, 0, 0xA5DC, 0x65, 0, 0x0409, 0, (1 if dot else 0) | (0x0100 if encrypted else 0) | (0x0004 if pieces else 0))
+    if pieces:
+        stored, at, fcs = b'', 0x300, {}
+        for i in reversed(range(len(pieces))):
+            fcs[i] = at + len(stored)
+            stored += pieces[i].encode('latin-1')
+        text_bytes = stored
+        cps = [0]
+        for piece in pieces:
+            cps.append(cps[-1] + len(piece))
+        plc = b''.join(struct.pack('<I', c) for c in cps) + b''.join(struct.pack('<HIH', 0, fcs[i], 0) for i in range(len(pieces)))
+        clx = b'\x02' + struct.pack('<I', len(plc)) + plc
+        struct.pack_into('<II', fib, 0x160, 0x300 + len(text_bytes) + macros, len(clx))
+    else:
+        text_bytes, clx = text.encode('latin-1'), b''
+    struct.pack_into('<II', fib, 0x18, 0x300, 0x300 + len(text_bytes))
+    struct.pack_into('<II', fib, 0x118, 0x300 + len(text_bytes), macros)
+    body = bytes(fib) + text_bytes + bytes(macros) + clx
     return cfb([Stream('WordDocument', body.ljust(4096, b'\0'))])
 
 # ---------- Excel 5.0 to 2003 workbooks ----------
@@ -1498,11 +1521,19 @@ def cstring(text, instance):
     return prec(0x0FBA, text.encode('utf-16-le'), instance)
 
 
-def ppt(objects=(), document=b'', slides=b'', encrypted=False, extra_persist=None):
+def ppt(objects=(), document=b'', slides=b'', encrypted=False, extra_persist=None, password=None):
     """A presentation stream: a DocumentContainer, a slide, the persist objects, a persist directory and the current edit.
-    `objects` are (persist id, record) pairs that the directory names."""
+    `objects` are (persist id, record) pairs that the directory names. `password` encrypts it as PowerPoint does
+    (MS-PPT 2.3.7): a CryptSession10Container persist object with an RC4 CryptoAPI header, and every other persist
+    object, its header included, RC4 with the key of its persist id."""
     out = bytearray()
     offsets = {}
+    session = None
+    if password is not None:
+        encrypted = True
+        header, key = rc4_header(password, 'cryptoapi')
+        objects = list(objects) + [(90, prec(0x2F14, header, container=True))]
+        session = 90
     doc = prec(0x03E8, prec(0x03E9, bytes(40)) + document, container=True)
     offsets[1] = len(out)
     out += doc
@@ -1518,8 +1549,14 @@ def ppt(objects=(), document=b'', slides=b'', encrypted=False, extra_persist=Non
     dir_at = len(out)
     out += prec(0x1772, directory)
     edit_at = len(out)
-    out += prec(0x0FF5, struct.pack('<IHBBIIIIHH', 0, 0, 0, 3, 0, dir_at, 1, max(ids) + 1, 1, 0))
+    out += prec(0x0FF5, struct.pack('<IHBBIIIIHH', 0, 0, 0, 3, 0, dir_at, 1, max(ids) + 1, 1, 0) + (struct.pack('<I', session) if session else b''))
     user = prec(0x0FF6, struct.pack('<IIIHHBBH', 0x14, 0xF3D1C4DF if encrypted else 0xE391C05F, edit_at, 0, 0x03F4, 3, 0, 0))
+    if session:
+        for pid, at in offsets.items():
+            if pid == session:
+                continue
+            length = 8 + struct.unpack_from('<I', out, at + 4)[0]
+            out[at:at + length] = rc4(key(pid), bytes(out[at:at + length]))
     return cfb([Stream('PowerPoint Document', bytes(out)), Stream('Current User', user)], root_clsid='64818D10-4F9B-11CF-86EA-00AA00B929E8')
 
 
@@ -1548,8 +1585,65 @@ def attachment(n, method, name, mime=None, data=None, path=None, children=()):
     return Storage('__attach_version1.0_#%08X' % n, kids)
 
 
-def msg(attachments, clsid='00020D0B-0000-0000-C000-000000000046'):
-    return cfb([Stream('__properties_version1.0', props([], 32)), Stream('__substg1.0_0037001F', 'Inert subject'.encode('utf-16-le')), Storage('__nameid_version1.0', [])] + list(attachments), root_clsid=clsid)
+RTF_PRESET = (b'{\\rtf1\\ansi\\mac\\deff0\\deftab720{\\fonttbl;}{\\f0\\fnil \\froman \\fswiss \\fmodern \\fscript \\fdecor MS Sans SerifSymbolArialTimes New RomanCourier'
+              b'{\\colortbl\\red0\\green0\\blue0\r\n\\par \\pard\\plain\\f0\\fs20\\b\\i\\u\\tab\\tx')
+
+
+def compress_rtf(rtf, crc=None):
+    """PidTagRtfCompressed (MS-OXRTFCP): LZFu over a 4,096-byte dictionary that starts with RTF_PRESET. Each match is
+    the longest of 2 to 17 bytes that ends before the write offset, so no copy reads what it writes."""
+    assert len(RTF_PRESET) == 207
+    d = bytearray(4096)
+    d[:207] = RTF_PRESET
+    write, i, out = 207, 0, bytearray()
+    done = False
+    while not done:
+        control, tokens = 0, bytearray()
+        for bit in range(8):
+            if i >= len(rtf):
+                control |= 1 << bit
+                tokens += struct.pack('>H', write << 4)
+                done = True
+                break
+            best, at = 0, 0
+            for o in range(4096):
+                if o == write:
+                    continue
+                n = 0
+                while n < 17 and i + n < len(rtf) and (o + n) % 4096 != write and d[(o + n) % 4096] == rtf[i + n]:
+                    n += 1
+                if n > best:
+                    best, at = n, o
+            if best >= 2:
+                control |= 1 << bit
+                tokens += struct.pack('>H', (at << 4) | (best - 2))
+                for k in range(best):
+                    d[write] = rtf[i + k]
+                    write = (write + 1) % 4096
+                i += best
+            else:
+                tokens.append(rtf[i])
+                d[write] = rtf[i]
+                write = (write + 1) % 4096
+                i += 1
+        out.append(control)
+        out += tokens
+    # The CRC of MS-OXRTFCP starts at 0 and is never inverted.
+    value = (zlib.crc32(bytes(out), 0xFFFFFFFF) ^ 0xFFFFFFFF) if crc is None else crc
+    return struct.pack('<IIII', len(out) + 12, len(rtf), 0x75465A4C, value) + bytes(out)
+
+
+def msg(attachments, clsid='00020D0B-0000-0000-C000-000000000046', rtf_body=None, html_body=None):
+    """An Outlook message. `rtf_body` is a PidTagRtfCompressed value and `html_body` the bytes of PidTagHtml, each
+    with its entry in the property stream."""
+    entries, extra = [], []
+    if rtf_body is not None:
+        entries.append((0x10090102, len(rtf_body)))
+        extra.append(Stream('__substg1.0_10090102', rtf_body))
+    if html_body is not None:
+        entries.append((0x10130102, len(html_body)))
+        extra.append(Stream('__substg1.0_10130102', html_body))
+    return cfb([Stream('__properties_version1.0', props(entries, 32)), Stream('__substg1.0_0037001F', 'Inert subject'.encode('utf-16-le')), Storage('__nameid_version1.0', [])] + extra + list(attachments), root_clsid=clsid)
 
 
 # ---------- encryption, with fixed salts and keys so a rebuild writes the same bytes ----------
@@ -1632,6 +1726,18 @@ def aes_encrypt(key, data, iv=None):
     return bytes(out)
 
 
+def aes_cfb8_encrypt(key, data, iv):
+    """AES in CFB with an 8-bit window, which Agile's ChainingModeCFB names: each byte is XORed with the first byte of the
+    encryption of the 16 ciphertext bytes before it, the IV standing in front."""
+    keys = _expand(key)
+    register, out = bytearray(iv[:16]), bytearray()
+    for b in data:
+        c = b ^ _encrypt_block(keys, bytes(register))[0]
+        out.append(c)
+        register = register[1:] + bytes([c])
+    return bytes(out)
+
+
 def rc4(key, data):
     s = list(range(256))
     j = 0
@@ -1651,9 +1757,12 @@ def pad16(b, fill=0):
     return b + bytes([fill]) * (-len(b) % 16)
 
 
-def agile_encrypt(package, password, spin=100000, hash_name='sha512', cipher='AES', salt_size=True):
+def agile_encrypt(package, password, spin=100000, hash_name='sha512', cipher='AES', salt_size=True, chaining='cbc'):
     """An encrypted OOXML package (MS-OFFCRYPTO 2.3.4.10): AES-256-CBC and SHA-512 by default, with fixed salts and keys.
-    A hash shorter than the key, such as SHA-1's, is padded with 0x36 to make it."""
+    A hash shorter than the key, such as SHA-1's, is padded with 0x36 to make it. `chaining='cfb'` uses CFB with an
+    8-bit window, ChainingModeCFB, which needs no padding."""
+    enc = (lambda key, data, iv: aes_cfb8_encrypt(key, data, iv)) if chaining == 'cfb' else (lambda key, data, iv: aes_encrypt(key, pad16(data), iv))
+    mode = 'ChainingModeCFB' if chaining == 'cfb' else 'ChainingModeCBC'
     key_salt, data_salt, secret, verifier = bytes(range(16)), bytes(range(16, 32)), bytes(range(32, 64)), bytes(range(64, 80))
     H = lambda data: hashlib.new(hash_name, data).digest()
     h = H(key_salt + password.encode('utf-16-le'))
@@ -1662,28 +1771,28 @@ def agile_encrypt(package, password, spin=100000, hash_name='sha512', cipher='AE
 
     def derive(block):
         return (H(h + block) + b'\x36' * 32)[:32]
-    enc_input = aes_encrypt(derive(bytes.fromhex('fea7d2763b4b9e79')), verifier, key_salt)
-    enc_value = aes_encrypt(derive(bytes.fromhex('d7aa0f6d3061344e')), pad16(H(verifier)), key_salt)
-    enc_key = aes_encrypt(derive(bytes.fromhex('146e0be7abacd0d6')), secret, key_salt)
+    enc_input = enc(derive(bytes.fromhex('fea7d2763b4b9e79')), verifier, key_salt)
+    enc_value = enc(derive(bytes.fromhex('d7aa0f6d3061344e')), H(verifier), key_salt)
+    enc_key = enc(derive(bytes.fromhex('146e0be7abacd0d6')), secret, key_salt)
     body = bytearray(struct.pack('<Q', len(package)))
     for k in range(0, len(package), 4096):
         iv = H(data_salt + struct.pack('<I', k // 4096))[:16]
-        body += aes_encrypt(secret, pad16(package[k:k + 4096]), iv)
+        body += enc(secret, package[k:k + 4096], iv)
     # The integrity check Office writes: an HMAC key, and the HMAC of the encrypted package, each encrypted.
     hmac_key = bytes(range(128, 192))[:len(H(b''))]
     hmac_value = hmac.new(hmac_key, bytes(body), hash_name).digest()
-    enc_hmac_key = aes_encrypt(secret, pad16(hmac_key), H(data_salt + bytes.fromhex('5fb2ad010cb9e1f6'))[:16])
-    enc_hmac_value = aes_encrypt(secret, pad16(hmac_value), H(data_salt + bytes.fromhex('a0677f02b22c8433'))[:16])
+    enc_hmac_key = enc(secret, hmac_key, H(data_salt + bytes.fromhex('5fb2ad010cb9e1f6'))[:16])
+    enc_hmac_value = enc(secret, hmac_value, H(data_salt + bytes.fromhex('a0677f02b22c8433'))[:16])
     b = lambda x: base64.b64encode(x).decode()
     name, size = {'sha512': ('SHA512', 64), 'sha1': ('SHA1', 20)}[hash_name]
     salt_attr = 'saltSize="16" ' if salt_size else ''
     xml = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n<encryption xmlns="http://schemas.microsoft.com/office/2006/encryption" '
            'xmlns:p="http://schemas.microsoft.com/office/2006/keyEncryptor/password"><keyData saltSize="16" blockSize="16" keyBits="256" hashSize="%d" '
-           'cipherAlgorithm="%s" cipherChaining="ChainingModeCBC" hashAlgorithm="%s" saltValue="%s"/><dataIntegrity encryptedHmacKey="%s" encryptedHmacValue="%s"/><keyEncryptors><keyEncryptor '
+           'cipherAlgorithm="%s" cipherChaining="%s" hashAlgorithm="%s" saltValue="%s"/><dataIntegrity encryptedHmacKey="%s" encryptedHmacValue="%s"/><keyEncryptors><keyEncryptor '
            'uri="http://schemas.microsoft.com/office/2006/keyEncryptor/password"><p:encryptedKey spinCount="%d" %sblockSize="16" keyBits="256" '
-           'hashSize="%d" cipherAlgorithm="%s" cipherChaining="ChainingModeCBC" hashAlgorithm="%s" saltValue="%s" encryptedVerifierHashInput="%s" '
+           'hashSize="%d" cipherAlgorithm="%s" cipherChaining="%s" hashAlgorithm="%s" saltValue="%s" encryptedVerifierHashInput="%s" '
            'encryptedVerifierHashValue="%s" encryptedKeyValue="%s"/></keyEncryptor></keyEncryptors></encryption>') % (
-        size, cipher, name, b(data_salt), b(enc_hmac_key), b(enc_hmac_value), spin, salt_attr, size, cipher, name, b(key_salt), b(enc_input), b(enc_value), b(enc_key))
+        size, cipher, mode, name, b(data_salt), b(enc_hmac_key), b(enc_hmac_value), spin, salt_attr, size, cipher, mode, name, b(key_salt), b(enc_input), b(enc_value), b(enc_key))
     info = struct.pack('<HHI', 4, 4, 0x40) + xml.encode()
     return info, bytes(body)
 
@@ -1711,24 +1820,110 @@ def encrypted_package(package, password, kind='agile', stub=False, **options):
     return cfb([Stream('EncryptionInfo', info), Stream('EncryptedPackage', body), spaces] + extra)
 
 
-def biff_encrypt(stream, password, method='rc4', bits=128, alg=0x6801):
-    """A BIFF8 workbook stream with a FILEPASS record after its BOF and every later record encrypted (MS-XLS 2.2.10):
-    RC4 keyed per 1,024-byte block of the stream, record headers left plain, and lbPlyPos of BoundSheet8 too."""
+def rc4_header(password, method='rc4', bits=128, alg=0x6801):
+    """The EncryptionHeader of a binary document, from its version on, and the key of each block: RC4 (MS-OFFCRYPTO
+    2.3.6) or RC4 CryptoAPI (2.3.5), with a fixed salt and verifier."""
     salt, verifier = bytes(range(200, 216)), bytes(range(216, 232))
     if method == 'rc4':
         h0 = hashlib.md5(password.encode('utf-16-le')).digest()[:5]
         h1 = hashlib.md5((h0 + salt) * 16).digest()[:5]
         key = lambda block: hashlib.md5(h1 + struct.pack('<I', block)).digest()
         enc = rc4(key(0), verifier + hashlib.md5(verifier).digest())
-        filepass = struct.pack('<HHH', 1, 1, 1) + salt + enc
+        return struct.pack('<HH', 1, 1) + salt + enc, key
+    h0 = hashlib.sha1(salt + password.encode('utf-16-le')).digest()
+    size = bits or 40
+    key = lambda block: hashlib.sha1(h0 + struct.pack('<I', block)).digest()[:5] + bytes(11) if size == 40 else hashlib.sha1(h0 + struct.pack('<I', block)).digest()[:size // 8]
+    enc = rc4(key(0), verifier + hashlib.sha1(verifier).digest())
+    csp = 'Microsoft Enhanced Cryptographic Provider v1.0\0'.encode('utf-16-le')
+    header = struct.pack('<IIIIIIII', 0x04, 0, alg, 0x8004, bits, 1, 0, 0) + csp
+    return struct.pack('<HH', 4, 2) + struct.pack('<I', 0x04) + struct.pack('<I', len(header)) + header + struct.pack('<I', 16) + salt + enc[:16] + struct.pack('<I', 20) + enc[16:], key
+
+
+# XOR obfuscation (MS-OFFCRYPTO 2.3.7), written from the specification's pseudocode.
+XOR_PAD = [0xBB, 0xFF, 0xFF, 0xBA, 0xFF, 0xFF, 0xB9, 0x80, 0x00, 0xBE, 0x0F, 0x00, 0xBF, 0x0F, 0x00]
+XOR_INITIAL = [0xE1F0, 0x1D0F, 0xCC9C, 0x84C0, 0x110C, 0x0E10, 0xF1CE, 0x313E, 0x1872, 0xE139, 0xD40F, 0x84F9, 0x280C, 0xA96A, 0x4EC3]
+XOR_MATRIX = [
+    0xAEFC, 0x4DD9, 0x9BB2, 0x2745, 0x4E8A, 0x9D14, 0x2A09, 0x7B61, 0xF6C2, 0xFDA5, 0xEB6B, 0xC6F7, 0x9DCF, 0x2BBF, 0x4563, 0x8AC6,
+    0x05AD, 0x0B5A, 0x16B4, 0x2D68, 0x5AD0, 0x0375, 0x06EA, 0x0DD4, 0x1BA8, 0x3750, 0x6EA0, 0xDD40, 0xD849, 0xA0B3, 0x5147, 0xA28E,
+    0x553D, 0xAA7A, 0x44D5, 0x6F45, 0xDE8A, 0xAD35, 0x4A4B, 0x9496, 0x390D, 0x721A, 0xEB23, 0xC667, 0x9CEF, 0x29FF, 0x53FE, 0xA7FC,
+    0x5FD9, 0x47D3, 0x8FA6, 0x0F6D, 0x1EDA, 0x3DB4, 0x7B68, 0xF6D0, 0xB861, 0x60E3, 0xC1C6, 0x93AD, 0x377B, 0x6EF6, 0xDDEC, 0x45A0,
+    0x8B40, 0x06A1, 0x0D42, 0x1A84, 0x3508, 0x6A10, 0xAA51, 0x4483, 0x8906, 0x022D, 0x045A, 0x08B4, 0x1168, 0x76B4, 0xED68, 0xCAF1,
+    0x85C3, 0x1BA7, 0x374E, 0x6E9C, 0x3730, 0x6E60, 0xDCC0, 0xA9A1, 0x4363, 0x86C6, 0x1DAD, 0x3331, 0x6662, 0xCCC4, 0x89A9, 0x0373,
+    0x06E6, 0x0DCC, 0x1021, 0x2042, 0x4084, 0x8108, 0x1231, 0x2462, 0x48C4]
+
+
+def xor_key1(pw):
+    """CreateXorKey_Method1."""
+    key = XOR_INITIAL[len(pw) - 1]
+    element = 0x68
+    for c in reversed(pw):
+        for _ in range(7):
+            if c & 0x40:
+                key ^= XOR_MATRIX[element]
+            c *= 2
+            element -= 1
+    return key & 0xFFFF
+
+
+def xor_verifier1(pw):
+    """CreatePasswordVerifier_Method1."""
+    v = 0
+    for b in reversed(bytes([len(pw)]) + pw):
+        v = ((1 if v & 0x4000 else 0) | ((v * 2) & 0x7FFF)) ^ b
+    return v ^ 0xCE4B
+
+
+def xor_ror(b):
+    return ((b >> 1) | (b << 7)) & 0xFF
+
+
+def xor_array1(pw):
+    """CreateXorArray_Method1."""
+    key = xor_key1(pw)
+    hi, lo = key >> 8, key & 0xFF
+    out = [0] * 16
+    i = len(pw)
+    if i % 2 == 1:
+        out[i] = xor_ror(XOR_PAD[0] ^ hi)
+        i -= 1
+        out[i] = xor_ror(pw[-1] ^ lo)
+    while i > 0:
+        i -= 1
+        out[i] = xor_ror(pw[i] ^ hi)
+        i -= 1
+        out[i] = xor_ror(pw[i] ^ lo)
+    i, pad = 15, 15 - len(pw)
+    while pad > 0:
+        out[i] = xor_ror(XOR_PAD[pad] ^ hi)
+        i -= 1
+        pad -= 1
+        out[i] = xor_ror(XOR_PAD[pad] ^ lo)
+        i -= 1
+        pad -= 1
+    return out
+
+
+def xor_array2(pw):
+    """CreateXorArray_Method2, which Word uses."""
+    key = xor_key1(pw)
+    out = [pw[i] if i < len(pw) else XOR_PAD[i - len(pw)] for i in range(16)]
+    for i in range(0, 16, 2):
+        out[i] = xor_ror(out[i] ^ (key & 0xFF))
+        out[i + 1] = xor_ror(out[i + 1] ^ (key >> 8))
+    return out
+
+
+def biff_encrypt(stream, password, method='rc4', bits=128, alg=0x6801):
+    """A BIFF8 workbook stream with a FILEPASS record after its BOF and every later record encrypted (MS-XLS 2.2.10):
+    RC4 keyed per 1,024-byte block of the stream, record headers left plain, and lbPlyPos of BoundSheet8 too. `xor`
+    obfuscates with method 1 instead, each record's bytes from the index its offset and size give."""
+    if method == 'xor':
+        pw = password.encode('latin-1')
+        filepass = struct.pack('<HHH', 0, xor_key1(pw), xor_verifier1(pw))
+        array = xor_array1(pw)
     else:
-        h0 = hashlib.sha1(salt + password.encode('utf-16-le')).digest()
-        size = bits or 40
-        key = lambda block: hashlib.sha1(h0 + struct.pack('<I', block)).digest()[:5] + bytes(11) if size == 40 else hashlib.sha1(h0 + struct.pack('<I', block)).digest()[:size // 8]
-        enc = rc4(key(0), verifier + hashlib.sha1(verifier).digest())
-        csp = 'Microsoft Enhanced Cryptographic Provider v1.0\0'.encode('utf-16-le')
-        header = struct.pack('<IIIIIIII', 0x04, 0, alg, 0x8004, bits, 1, 0, 0) + csp
-        filepass = struct.pack('<HHH', 1, 4, 2) + struct.pack('<I', 0x04) + struct.pack('<I', len(header)) + header + struct.pack('<I', 16) + salt + enc[:16] + struct.pack('<I', 20) + enc[16:]
+        header, key = rc4_header(password, method, bits, alg)
+        filepass = struct.pack('<H', 1) + header
     first = struct.unpack_from('<H', stream, 2)[0] + 4
     fp = rec(0x002F, filepass)
     plain = bytearray(stream[:first] + fp + stream[first:])
@@ -1754,9 +1949,45 @@ def biff_encrypt(stream, password, method='rc4', bits=128, alg=0x6801):
         t, n = struct.unpack_from('<HH', plain, p)
         if t not in (0x0809, 0x002F, 0x0194, 0x0195, 0x00E1, 0x0196, 0x0138):
             for k in range(4 if t == 0x0085 else 0, n):
-                out[p + 4 + k] ^= ks(p + 4 + k)
+                if method == 'xor':
+                    v = plain[p + 4 + k]
+                    out[p + 4 + k] = (((v << 5) | (v >> 3)) & 0xFF) ^ array[(p + 4 + n + k) % 16]
+                else:
+                    out[p + 4 + k] ^= ks(p + 4 + k)
         p += 4 + n
     return bytes(out)
+
+
+def word_encrypt(text, password, method):
+    """An encrypted Word 97 document (MS-DOC 2.2.6) whose text is `text`. RC4 and RC4 CryptoAPI put the EncryptionHeader
+    in the table stream's first lKey bytes, and encrypt the WordDocument stream past its first 68 bytes and the rest of
+    the table stream in 512-byte blocks. `xor` obfuscates with method 2 and puts the verifier in lKey."""
+    if method == 'xor':
+        pw = password.encode('latin-1')
+        prefix, lkey = b'', (xor_key1(pw) << 16) | xor_verifier1(pw)
+    else:
+        prefix, key = rc4_header(password, method)
+        lkey = len(prefix)
+    word, table, data = word_doc(text, streams=True, table_prefix=prefix, flags_extra=0x0100 | (0x8000 if method == 'xor' else 0))
+    word = bytearray(word)
+    struct.pack_into('<I', word, 14, lkey)
+
+    def transform(buf, plain):
+        out = bytearray(buf)
+        if method == 'xor':
+            array = xor_array2(pw)
+            for i in range(plain, len(out)):
+                a = array[i % 16]
+                if out[i] != 0 and out[i] != a:
+                    out[i] ^= a
+        else:
+            for b in range(0, len(out), 512):
+                ks = rc4(key(b // 512), bytes(512))
+                for i in range(max(b, plain), min(b + 512, len(out))):
+                    out[i] ^= ks[i - b]
+        return bytes(out)
+    return cfb([Stream('WordDocument', transform(word, 68)), Stream('1Table', transform(table, len(prefix))), Stream('\x01CompObj', comp_obj('Microsoft Word 97-2004 Document', 'Word.Document.8'))],
+               root_clsid='00020906-0000-0000-C000-000000000046')
 
 
 # ---------- binary Office files and RTF, written byte by byte ----------
@@ -1778,6 +2009,145 @@ def object_pool(objects):
     return Storage('ObjectPool', [Storage('_%d' % (1000 + i), kids, clsid) for i, (kids, clsid) in enumerate(objects)])
 
 
+VISIO_CLSID = '00021A14-0000-0000-C000-000000000046'
+
+
+def vsd_compress(data):
+    """Visio's LZ77, as libvisio's VSDInternalStream.cpp reads it: a flag byte for each eight items, a set bit for a
+    literal byte and a clear one for a 2-byte reference to 3 to 18 bytes in a 4,096-byte window. The window position
+    of output byte n is n % 4096, and a reference stores that position less 18. A reference may overlap the bytes it
+    writes, as a run of one byte does."""
+    out = bytearray()
+    last = {}
+    i, n = 0, len(data)
+    while i < n:
+        flag, items = 0, bytearray()
+        for bit in range(8):
+            if i >= n:
+                break
+            at = last.get(data[i:i + 3])
+            k = 0
+            if at is not None and i - at <= 4000:
+                while k < 18 and i + k < n and data[at + k] == data[i + k]:
+                    k += 1
+            for j in range(i, i + max(k, 1)):
+                last[data[j:j + 3]] = j
+            if k >= 3:
+                p = (at % 4096 - 18) % 4096
+                items += bytes([p & 0xff, ((p >> 8) << 4) | (k - 3)])
+                i += k
+            else:
+                flag |= 1 << bit
+                items.append(data[i])
+                i += 1
+        out.append(flag)
+        out += items
+    assert vsd_inflate(bytes(out)) == data
+    return bytes(out)
+
+
+def vsd_inflate(src):
+    out, window, i = bytearray(), bytearray(4096), 0
+    while i < len(src):
+        flag = src[i]
+        i += 1
+        for bit in range(8):
+            if i >= len(src):
+                break
+            if flag & (1 << bit):
+                window[len(out) % 4096] = src[i]
+                out.append(src[i])
+                i += 1
+            else:
+                p = ((src[i + 1] & 0xf0) << 4) | src[i]
+                p = p - 4078 if p > 4078 else p + 18
+                for j in range((src[i + 1] & 15) + 3):
+                    c = window[(p + j) % 4096]
+                    window[len(out) % 4096] = c
+                    out.append(c)
+                i += 2
+    return bytes(out)
+
+
+# Formula tokens (OLEToy vsdblock.py): strings, numbers, references, operators and calls, in reverse Polish order.
+def vf_str(s, wide=True):
+    return b'\x60' + bytes([len(s)]) + (s.encode('utf-16-le') + b'\0\0' if wide else s.encode('latin-1') + b'\0')
+
+
+def vf_long(s):
+    return b'\x69' + struct.pack('<I', len(s)) + s.encode('utf-16-le') + b'\0\0'
+
+
+def vf_num(x):
+    return b'\x20' + struct.pack('<d', x)
+
+
+def vf_call(fn, args=None):
+    """A function call: fixed arguments, or a count of them."""
+    if args is None:
+        return b'\x80' + struct.pack('<H', fn) + b'\x00\x40'
+    return b'\x81' + struct.pack('<IH', args, fn) + b'\x00\x40'
+
+
+RUNADDON, RUNADDONWARGS, CALLTHIS, RUNMACRO, OPENFILE, DOOLEVERB = 0x51, 0x79, 0x9b, 0xc7, 0x7b, 0x4f
+
+
+def vsd_block(kind, cell, body):
+    return struct.pack('<I', 6 + len(body)) + bytes([kind, cell]) + body
+
+
+def vsd_formula(cell, *tokens):
+    return vsd_block(2, cell, b''.join(tokens) + b'\xfe')
+
+
+def vsd_trailer11(ctype, lst, level, flags):
+    """The trailer after a chunk's data in a Visio 2003 file (libvisio VSDParser.cpp getChunkHeader)."""
+    if ctype in (0x1f, 0xc9, 0x2d, 0xd1):
+        return 0
+    n = 8 if lst or ctype in (0x71, 0x70, 0x6b, 0x6a, 0x69, 0x66, 0x65, 0x2c) else 0
+    if lst or (level == 2 and flags == 0x55) or (level == 2 and flags == 0x54 and ctype == 0xaa) or (level == 3 and flags not in (0x50, 0x54)):
+        n += 4
+    if ctype in (0x64, 0x65, 0x66, 0x69, 0x6a, 0x6b, 0x6f, 0x71, 0x92, 0xa9, 0xb4, 0xb6, 0xb9, 0xc7) and n not in (12, 4):
+        n += 4
+    return n
+
+
+def vsd_chunk(ctype, fixed, *blocks, version=11, lst=0, trailer=None, length=None):
+    """A chunk: a 19-byte header, `fixed` bytes of fixed fields, the cell blocks, and the trailer its header implies."""
+    data = bytes(fixed) + b''.join(blocks)
+    head = struct.pack('<IIIIHB', ctype, 0, lst, len(data) if length is None else length, 2, 0x50)
+    if trailer is None:
+        trailer = bytes(vsd_trailer11(ctype, lst, 2, 0x50) if version == 11 else (8 if lst else 0))
+    return head + data + trailer
+
+
+def vsd_pointer(ptype, offset, length, fmt):
+    return struct.pack('<IIIIH', ptype, 0, offset, length, fmt)
+
+
+def vsd_pointers(*pointers, count=None):
+    """A pointer list: the offset of its header, the header with the count, then the 18-byte pointers."""
+    return struct.pack('<IIII', 8, 0, len(pointers) if count is None else count, 0) + b''.join(pointers)
+
+
+def vsd_document(chunks, version=11, compressed=True, pointer_offset=None):
+    """A VisioDocument stream: the header with its version at 0x1A and the trailer pointer at 0x24, the trailer's
+    pointer list, a list naming the chunk stream, and the chunk stream."""
+    body = vsd_compress(chunks) if compressed else chunks
+    head = b'Visio (TM) Drawing\r\n'.ljust(0x1a, b'\0') + bytes([version]) + bytes(0x24 - 0x1b)
+    body_at = 0x60
+    pages = vsd_pointers(vsd_pointer(0x15, body_at if pointer_offset is None else pointer_offset, len(body), 0xd2 if compressed else 0xd0))
+    pages_at = body_at + len(body)
+    trailer = vsd_pointers(vsd_pointer(0x27, pages_at, len(pages), 0x50))
+    trailer_at = pages_at + len(pages)
+    head += vsd_pointer(0x14, trailer_at, len(trailer), 0x50)
+    return head.ljust(body_at, b'\0') + body + pages + trailer
+
+
+def visio_vsd(document):
+    return cfb([Stream('VisioDocument', document), Stream('\x05SummaryInformation', bytes(48))], root_clsid=VISIO_CLSID)
+
+
 def ole_files():
     """The binary Office formats, each feature in a file of its own."""
     files = {}
@@ -1786,9 +2156,16 @@ def ole_files():
     files['word-8bit.doc'] = word_doc(plain, compressed=True)
     files['template.dot'] = word_doc(plain, dot=True)
     files['word-password.doc'] = word_doc(plain, encrypted=True)
+    # Encrypted Word 97 documents whose DDE field only decryption shows: RC4, RC4 CryptoAPI and XOR obfuscation.
+    hidden = '\x13 DDEAUTO inert-app "inert topic" \x14r\x15\r'
+    for method in ('rc4', 'cryptoapi', 'xor'):
+        files['word-%s.doc' % method] = word_encrypt(hidden, 'inert-password', method)
     files['word6.doc'] = word6_doc(plain)
     files['word6-macros.dot'] = word6_doc(plain, macros=64, dot=True)
     files['word6-dde.doc'] = word6_doc('\x13 DDEAUTO inert-app "inert topic" \x14x\x15\r')
+    # A file saved fast, whose DDEAUTO field is split over two pieces stored in reverse order. Read in stored order,
+    # the field's name is cut in two.
+    files['word6-pieces.doc'] = word6_doc('', pieces=['\x13 DDEAU', 'TO inert-app "inert topic" \x14x\x15\r'])
     fields = ('\x13 DDEAUTO inert-app "inert topic" \x14r\x15'
               '\x13 INCLUDEPICTURE "https://example.invalid/inert.png" \\d \x14\x15'
               '\x13 INCLUDETEXT "C:\\\\inert\\\\local.doc" \x14\x15'
@@ -1845,7 +2222,54 @@ def ole_files():
     files['objects.ppt'] = ppt(objects=[(3, ex_ole_stg(obj, True)), (4, ex_ole_stg(vba, False)), (5, ex_ole_stg(ctl, True))], document=ex_list + vba_info, slides=actions)
     files['broken-object.ppt'] = ppt(objects=[(3, prec(0x1011, struct.pack('<I', 100) + b'not zlib data', instance=1)), (4, ex_ole_stg(b'not a compound file', False))], document=prec(0x0409, prec(0x0FCC, prec(0x0FC3, struct.pack('<IIIIII', 1, 0, 1, 0, 3, 0)), container=True), container=True))
     files['presentation-password.ppt'] = ppt(encrypted=True)
+    # Encrypted presentations: one with a password, holding a hyperlink only decryption shows, and one with
+    # PowerPoint's own default password.
+    link = prec(0x0409, prec(0x0FD7, prec(0x0FD3, struct.pack('<I', 3)) + cstring('https://example.invalid/inert', 1), container=True), container=True)
+    files['ppt-cryptoapi.ppt'] = ppt(document=link, password='inert-password')
+    files['ppt-default.ppt'] = ppt(document=link, password='/01Hannes Ruescher/01')
     files['visio.vsd'] = cfb([Stream('VisioDocument', b'Visio (TM) Drawing\r\n' + bytes(100)), Stream('\x05SummaryInformation', bytes(48))], root_clsid='00021A14-0000-0000-C000-000000000046')
+    # Visio 2003 drawings whose ShapeSheet cells call code, and one cell of each kind that does not. The chunk types
+    # and block starts are those office-defuse reads: Events 0x84 at 17, Actions 0xA9 at 57, User-defined Cells 0xB4
+    # at 15, Scratch 0x9E at 56, Shape Data 0xB6 at 36, Shape Transform 0x9B at 69 and NURBSTo 0xC3 at 61. Smart Tags,
+    # 0xC7, is a type whose blocks office-defuse does not know where to find.
+    nurbs = b'\x8a' + struct.pack('<dHBBI', 1.0, 3, 0, 0, 1) + struct.pack('<dddd', 1.0, 1.0, 1.0, 1.0)
+    branch = b'\xa2' + struct.pack('<I', 40) + b'\xa0' + struct.pack('<I', 8) + b'\x62\x01\x00' + b'\xa3' + struct.pack('<I', 30) + b'\x93'
+    cells = (vsd_chunk(0x84, 17, vsd_formula(1, vf_str('Inert')), vsd_block(3, 1, struct.pack('<IIBB', 5, 12, 1, 2)),
+                       vsd_formula(2, vf_str('inert.exe'), vf_call(RUNADDON)), vsd_formula(4, vf_str('inert'), vf_str('/x'), vf_call(RUNADDONWARGS)))
+             + vsd_chunk(0xa9, 57, vsd_formula(0, vf_str('Inert')), vsd_formula(3, vf_str('Module1.Inert'), vf_call(CALLTHIS, 1)))
+             + vsd_chunk(0xb4, 15, vsd_formula(0, branch, vf_str('Inert'), vf_call(RUNMACRO, 1), b'\x90'))
+             + vsd_chunk(0x9e, 56, vsd_formula(0, vf_long('x' * 300), vf_call(OPENFILE)))
+             + vsd_chunk(0xb6, 36, vsd_formula(0, vf_str('Open'), vf_call(DOOLEVERB)))
+             + vsd_chunk(0x9b, 69, vsd_formula(2, b'\x75' + struct.pack('<I', 0x4e), vf_num(0.5), b'\x05\xf0'))
+             + vsd_chunk(0xc3, 61, vsd_formula(6, nurbs, vf_call(0xa1, 1)))
+             + vsd_chunk(0xc7, 30, vf_call(RUNADDON)))
+    files['vsd-cells.vsd'] = visio_vsd(vsd_document(cells))
+    # A Visio 2000 drawing, uncompressed, whose strings are 8-bit.
+    files['vsd2000-cells.vsd'] = visio_vsd(vsd_document(
+        vsd_chunk(0x84, 17, vsd_formula(3, vf_str('inert', False), vf_str('/y', False), vf_call(RUNADDONWARGS)), version=6)
+        + vsd_chunk(0xa9, 28, vsd_formula(3, vf_str('inert', False), vf_call(RUNADDON)), version=6), version=6, compressed=False))
+    # A call in the trailer of a chunk, where a chunk walk that took the trailer for data would find it.
+    files['vsd-between-chunks.vsd'] = visio_vsd(vsd_document(vsd_chunk(0x84, 17, lst=1, trailer=vf_call(RUNADDON) + bytes(7)) + vsd_chunk(0x84, 17)))
+    # Structures that do not read, each refused: a cell block longer than its chunk, an unknown token, a chunk longer
+    # than its stream, a pointer past the end of the stream, and a pointer list that counts more than it holds.
+    files['vsd-block-past-chunk.vsd'] = visio_vsd(vsd_document(vsd_chunk(0x84, 17, struct.pack('<I', 200) + b'\x02\x02\xfe')))
+    files['vsd-unknown-token.vsd'] = visio_vsd(vsd_document(vsd_chunk(0x84, 17, vsd_formula(2, b'\xee'))))
+    files['vsd-chunk-past-stream.vsd'] = visio_vsd(vsd_document(vsd_chunk(0x84, 17, length=5000)))
+    files['vsd-pointer-past-end.vsd'] = visio_vsd(vsd_document(vsd_chunk(0x84, 17), pointer_offset=0x100000))
+    doc = bytearray(vsd_document(vsd_chunk(0x84, 17)))
+    trailer_at = struct.unpack_from('<I', doc, 0x24 + 8)[0]
+    struct.pack_into('<I', doc, trailer_at + 8, 1000)
+    files['vsd-pointer-count.vsd'] = visio_vsd(bytes(doc))
+    # A drawing that decompresses to 40,000 bytes, most of them one repeated run, for the limits.
+    files['vsd-large.vsd'] = visio_vsd(vsd_document(vsd_chunk(0x84, 17) + vsd_chunk(0xc7, 40000)))
+    # Message bodies: an RTF body with a DDE field, one whose CRC is wrong, an HTML body, and an embedded message
+    # whose own RTF body holds the field.
+    dde_rtf = b'{\\rtf1\\ansi{\\field{\\*\\fldinst DDEAUTO inert-app "inert topic"}{\\fldrslt result}}\\par kept text}'
+    files['message-rtf-body.msg'] = msg([], rtf_body=compress_rtf(dde_rtf))
+    files['message-rtf-crc.msg'] = msg([], rtf_body=compress_rtf(dde_rtf, crc=1))
+    files['message-html-body.msg'] = msg([], html_body=b'<html><body><p>inert</p></body></html>')
+    inner = [Stream('__properties_version1.0', props([(0x10090102, len(compress_rtf(dde_rtf)))], 24)), Stream('__substg1.0_10090102', compress_rtf(dde_rtf))]
+    files['message-embedded-body.msg'] = msg([Storage('__attach_version1.0_#00000000', [Stream('__properties_version1.0', props([(0x37050003, 5)], 8)), Stream('__substg1.0_3707001F', 'inner.msg'.encode('utf-16-le')), Storage('__substg1.0_3701000D', inner)])])
     files['message.msg'] = msg([
         attachment(0, 1, 'inert.txt', 'text/plain', data=b'inert marker'),
         attachment(1, 2, 'linked.txt', path='\\\\inert.example.invalid\\share\\linked.txt'),
@@ -1918,6 +2342,17 @@ def variant_files():
     # the limit, SHA-1 and no salt size, and a package with data after its archive.
     book = workbook([('Sheet1', 0, 0x10)])
     files['cryptoapi-40.xls'] = cfb([Stream('Workbook', biff_encrypt(book, 'VelvetSweatshop', 'cryptoapi', bits=0))])
+    # Cell formulas that reach outside: CALL by its function index, and WEBSERVICE by the name Excel 2013 writes
+    # for it, a defined name _xlfn.WEBSERVICE called as an add-in function.
+    def formula(rgce):
+        return rec(0x0006, struct.pack('<HHH', 0, 0, 0) + bytes(8) + struct.pack('<HI', 0, 0) + struct.pack('<H', len(rgce)) + rgce)
+    call = b'\x17\x04\x00calc' + b'\x22\x01\x96\x00'
+    webservice = b'\x23' + struct.pack('<I', 1) + b'\x17\x08\x00inert.ex' + b'\x22\x02\xff\x00'
+    files['formula-functions.xls'] = xls([('Sheet1', 0, 0x10)], globals_extra=lbl('_xlfn.WEBSERVICE'), sheet_extra={'Sheet1': formula(call) + formula(webservice)})
+    # XOR obfuscation hides a macro sheet's type in its BoundSheet8, which only decryption shows.
+    macro_book = workbook([('Sheet1', 0, 0x10), ('Macro1', 1, 0x40)])
+    files['xor-default.xls'] = cfb([Stream('Workbook', biff_encrypt(macro_book, 'VelvetSweatshop', 'xor'))])
+    files['xor-password.xls'] = cfb([Stream('Workbook', biff_encrypt(macro_book, 'inert-password', 'xor'))])
     files['cryptoapi-56.xls'] = cfb([Stream('Workbook', biff_encrypt(book, 'VelvetSweatshop', 'cryptoapi', bits=56))])
     files['cryptoapi-aes.xls'] = cfb([Stream('Workbook', biff_encrypt(book, 'VelvetSweatshop', 'cryptoapi', alg=0x660E))])
     files['filepass-version.xls'] = cfb([Stream('Workbook', book.replace(rec(0x000A), rec(0x002F, struct.pack('<HHH', 1, 9, 9)) + rec(0x000A), 1))])
@@ -1944,6 +2379,7 @@ def variant_files():
     files['standard-bits.docx'] = encrypted(standard_encrypt(package, 'VelvetSweatshop', bits=128)[0].replace(struct.pack('<III', 0x660E, 0x8004, 128), struct.pack('<III', 0x660E, 0x8004, 64)), body)
     files['agile-sha1.docx'] = encrypted_package(package, 'VelvetSweatshop', hash_name='sha1', salt_size=False, spin=1000)
     files['agile-trailing.docx'] = encrypted_package(package + b'inert trailing data', 'VelvetSweatshop', spin=1000)
+    files['agile-cfb.docx'] = encrypted_package(package, 'VelvetSweatshop', spin=1000, chaining='cfb')
     # PowerPoint: a current edit that is no UserEditAtom, persist entries past the stream, at a record already read
     # and at the tail of an atom that reads as a container, a record running past the stream, objects whose data is
     # cut short or declares more than the limit, a control without a class id, a VBA project and a control whose
@@ -2341,9 +2777,56 @@ def cases():
         with open(os.path.join(folder, name), 'wb') as f:
             f.write(build())
 
+def png_pixel():
+    """A PNG of one gray pixel, a whole picture file of its own."""
+    def chunk(kind, data):
+        return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data) & 0xffffffff)
+    ihdr = struct.pack('>IIBBBBB', 1, 1, 8, 0, 0, 0, 0)
+    return b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', ihdr) + chunk(b'IDAT', zlib.compress(b'\x00\x80')) + chunk(b'IEND', b'')
+
+
+# The start of a JPEG file and an inert marker, which is all a reader of the first bytes looks at.
+JPEG = b'\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00inert marker\xff\xd9'
+
+
+def media():
+    """media/: packages and RTF files holding pictures and other whole files, which go to the file plugins, beside
+    binary parts of the formats themselves, which do not."""
+    folder = os.path.join(OUT, 'media')
+    shutil.rmtree(folder, ignore_errors=True)
+    os.makedirs(folder)
+    png = png_pixel()
+    a = 'http://schemas.openxmlformats.org/drawingml/2006/main'
+    pic = 'http://schemas.openxmlformats.org/drawingml/2006/picture'
+    blip = ('<w:r><w:drawing><a:graphic xmlns:a="%s"><a:graphicData uri="%s"><pic:pic xmlns:pic="%s"><pic:blipFill>'
+            '<a:blip r:embed="rIdPng"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></w:drawing></w:r>') % (a, pic, pic)
+    vml = '<w:r><w:pict><v:shape><v:imagedata r:id="rIdJpeg"/></v:shape></w:pict></w:r>'
+    write_zip(os.path.join(folder, 'pictures.docx'), docx(
+        '<w:p>%s%s</w:p>' % (blip, vml),
+        parts=[('word/media/image1.png', png), ('word/media/image2.jpeg', JPEG), ('docProps/thumbnail.jpeg', JPEG),
+               ('word/printerSettings/printerSettings1.bin', b'inert printer settings'), ('word/fonts/font1.odttf', b'inert obfuscated font')],
+        defaults=[('png', 'image/png'), ('jpeg', 'image/jpeg'), ('bin', 'application/vnd.openxmlformats-officedocument.wordprocessingml.printerSettings'),
+                  ('odttf', 'application/vnd.openxmlformats-officedocument.obfuscatedFont')],
+        package_rels=[rel('rIdThumb', 'http://schemas.openxmlformats.org/package/2006/relationships/metadata/thumbnail', 'docProps/thumbnail.jpeg')],
+        part_rels={'word/document.xml': [rel('rIdPng', RT + 'image', 'media/image1.png'), rel('rIdJpeg', RT + 'image', 'media/image2.jpeg'),
+                                         rel('rIdPrint', RT + 'printerSettings', 'printerSettings/printerSettings1.bin'),
+                                         rel('rIdFont', RT + 'font', 'fonts/font1.odttf')]}))
+    body = ('<office:text><text:p><draw:frame><draw:image xlink:href="Pictures/1.png"/></draw:frame></text:p>'
+            '<text:p><draw:frame><draw:image xlink:href="./Pictures/2.jpeg"/></draw:frame></text:p></office:text>')
+    write_zip(os.path.join(folder, 'pictures.odt'), odf(body, files=[('Pictures/1.png', png), ('Pictures/2.jpeg', JPEG), ('Thumbnails/thumbnail.png', png)]))
+    rtf = (b'{\\rtf1\\ansi\\deff0{\\fonttbl{\\f0 Times New Roman;}}Pictures.\\par\n'
+           b'{\\pict\\pngblip\\picw1\\pich1 ' + png.hex().encode() + b'}\\par\n'
+           b'{\\*\\shppict{\\pict\\jpegblip\\picw1\\pich1\r\n' + JPEG.hex().encode() + b'}}{\\nonshppict{\\pict\\wmetafile8\\picw1\\pich1 0100}}\\par\n'
+           b'{\\pict\\pngblip\\bin' + str(len(png)).encode() + b' ' + png + b'}\\par}')
+    with open(os.path.join(folder, 'pictures.rtf'), 'wb') as f:
+        f.write(rtf)
+
 
 def main():
     try:
+        if sys.argv[1:] == ['media']:
+            media()
+            return
         if sys.argv[1:] != ['cases']:
             for sub in ('lo', 'docs', 'zip', 'ole', 'rtf', 'cfb'):
                 shutil.rmtree(os.path.join(OUT, sub), ignore_errors=True)
@@ -2351,6 +2834,7 @@ def main():
             docs()
             zips()
             binary()
+            media()
             for sub in ('docs', 'zip'):
                 for name in sorted(os.listdir(os.path.join(OUT, sub))):
                     fixed_times(os.path.join(OUT, sub, name))

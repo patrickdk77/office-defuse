@@ -1,7 +1,8 @@
 import { expect } from 'chai';
 import { autoName, parseBoundSheet, parseLbl, xlString } from '../src/biff';
-import { ByteReader, bounded, parseCompObj, parseOle1, parseOleStream, parsePackage, readMoniker, Truncated } from '../src/oleobj';
+import { ByteReader, bounded, parseCompObj, parseOle1, parseOleStream, parsePackage, readMoniker, replaceSized, Truncated } from '../src/oleobj';
 import { hyperlink, virtualPath } from '../src/xls';
+import { must } from './helpers/util';
 
 const u32 = (n: number) => {
   const b = Buffer.alloc(4);
@@ -87,7 +88,11 @@ describe('OLE structures', () => {
 
   it('reads Packager data with its file, as a link, or not at all', () => {
     const head = Buffer.concat([Buffer.from([2, 0]), Buffer.from('a.txt\0C:\\a.txt\0'), Buffer.alloc(8), Buffer.from('C:\\t\\a.txt\0')]);
-    expect(parsePackage(Buffer.concat([head, u32(5), Buffer.from('inert')]))).to.deep.equal({ fileName: 'a.txt', sourcePath: 'C:\\a.txt', tempPath: 'C:\\t\\a.txt', embedded: true, size: 5 });
+    const whole = Buffer.concat([head, u32(5), Buffer.from('inert'), Buffer.from('tail')]);
+    const pkg = must(parsePackage(whole), 'package');
+    expect(pkg).to.deep.equal({ fileName: 'a.txt', sourcePath: 'C:\\a.txt', tempPath: 'C:\\t\\a.txt', embedded: true, size: 5, dataAt: 40 });
+    // A file put in its place keeps what came before and after it, with the size set to match.
+    expect(Buffer.from(replaceSized(whole, pkg.dataAt, pkg.size, Buffer.from('xy'))).equals(Buffer.concat([head, u32(2), Buffer.from('xytail')]))).to.equal(true);
     expect(parsePackage(head)?.embedded).to.equal(false);
     expect(parsePackage(Buffer.from([2, 0, 0x61]))).to.equal(undefined);
   });

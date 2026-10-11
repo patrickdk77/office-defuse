@@ -51,8 +51,27 @@ export interface ZipEntry {
 
 /** Something the reader saw that it does not refuse. Each is a strip finding, since the rewrite drops the bytes. */
 export interface ZipNote {
-  detail: D.LeadingBytes | D.HiddenData | D.TrailingBytes;
+  detail: D.LeadingBytes | D.HiddenData | D.HiddenEntry | D.TrailingBytes;
   bytes: number;
+  /** For a hidden entry, where its local header sits. */
+  offset?: number;
+}
+
+const LOCAL_SIGNATURE = Buffer.from([0x50, 0x4b, 0x03, 0x04]);
+
+/** The offset of the first local file header signature in [start, end) of the file, or undefined. */
+async function findLocalHeader(reader: Reader, start: number, end: number, deadline: number | undefined): Promise<number | undefined> {
+  let carry = Buffer.alloc(0);
+  let at = start;
+  for await (const c of reader.chunks(start, end - start)) {
+    checkTime(deadline);
+    const b = Buffer.concat([carry, Buffer.from(c.buffer, c.byteOffset, c.byteLength)]);
+    const i = b.indexOf(LOCAL_SIGNATURE);
+    if (i >= 0) return at - carry.length + i;
+    carry = b.subarray(Math.max(0, b.length - 3));
+    at += c.length;
+  }
+  return undefined;
 }
 
 const fail = (detail: D, message: string, data?: Record<string, string | number>): never => {
@@ -130,6 +149,19 @@ function checkUnicodePath(extras: Map<number, Uint8Array>, name: string): void {
   if (other !== name) fail(D.NameEncoding, 'The Unicode path field names a different entry', { name });
 }
 
+/** True for a segment of nothing but dots and spaces, the empty one included. */
+function onlyDotsAndSpaces(seg: string): boolean {
+  for (const c of seg) if (c !== '.' && c !== ' ') return false;
+  return true;
+}
+
+/** A segment without the dots and spaces Windows drops from its end. A loop, since /[. ]+$/ backtracks. */
+function trimSegment(seg: string): string {
+  let end = seg.length;
+  while (end > 0 && (seg[end - 1] === '.' || seg[end - 1] === ' ')) end--;
+  return seg.slice(0, end);
+}
+
 function checkName(name: string, directory: boolean): void {
   const why = (reason: string) => fail(D.UnsafeName, `Entry name ${reason}`, { name, reason });
   if (name === '') why('is empty');
@@ -138,11 +170,17 @@ function checkName(name: string, directory: boolean): void {
   if (name.startsWith('/')) why('is absolute');
   if (/^[A-Za-z]:/.test(name)) why('starts with a drive letter');
   for (const seg of (directory ? name.slice(0, -1) : name).split('/')) {
-    if (seg === '' || seg === '.' || seg === '..') why('has an empty, "." or ".." segment');
+    // Windows drops trailing dots and spaces from each segment, so ".. " and "..." climb out as ".." does.
+    if (onlyDotsAndSpaces(seg)) why('has an empty segment, or one of only dots and spaces');
   }
 }
 
-/** The key two names collide on: percent-decoded, NFC and lowercase, without a directory's slash. */
+/**
+ * The key two names collide on: percent-decoded, NFKC and case-folded, without a directory's slash, and without the
+ * dots and spaces Windows drops from the end of each segment. Upper then lower case is the full folding, which takes a
+ * sharp s to ss as macOS's case-insensitive file system does. NFKC also joins compatibility forms such as ligatures
+ * and full-width letters.
+ */
 export function nameKey(name: string): string {
   let n = name;
   try {
@@ -150,7 +188,7 @@ export function nameKey(name: string): string {
   } catch {
     // Not valid percent-encoding, so it stays as written.
   }
-  return n.normalize('NFC').toLowerCase().replace(/\/$/, '');
+  return n.normalize('NFKC').toUpperCase().toLowerCase().replace(/\/$/, '').split('/').map(trimSegment).join('/');
 }
 
 /** ZIP64 values the central directory defers to its extra field, in the order the format fixes. */
@@ -328,20 +366,36 @@ export class ZipArchive {
       if (i % 256 === 0) checkTime(deadline);
       await ZipArchive.checkLocal(reader, e, raws[i], dirOffset);
     }
+    // A reader that walks the file cannot know where a stored entry with a data descriptor ends. It looks for the
+    // next signature, so a local header inside the data is an entry to it, and part of this entry here.
+    for (const e of entries) {
+      if (e.method !== 0 || !(e.flags & 0x0008) || e.compressedSize === 0) continue;
+      const at = await findLocalHeader(reader, e.dataOffset, e.dataOffset + e.compressedSize, deadline);
+      if (at !== undefined) notes.push({ detail: D.HiddenEntry, bytes: e.dataOffset + e.compressedSize - at, offset: at });
+    }
 
     // Entries and the central directory must tile the file. Bytes no entry covers are reported, overlaps refused.
     const sorted = [...entries].sort((a, b) => a.localOffset - b.localOffset);
+    const gaps: Array<[number, number]> = [];
     let covered = 0;
     let hidden = 0;
     for (const e of sorted) {
       if (e.localOffset < covered) fail(D.Overlap, 'Two entries share bytes', { name: e.name });
+      if (e.localOffset > covered) gaps.push([covered, e.localOffset]);
       if (covered === 0 && e.localOffset > 0) notes.push({ detail: D.LeadingBytes, bytes: e.localOffset });
       else hidden += e.localOffset - covered;
       covered = e.end;
     }
+    if (dirOffset > covered) gaps.push([covered, dirOffset]);
     if (sorted.length === 0 && dirOffset > 0) notes.push({ detail: D.LeadingBytes, bytes: dirOffset });
     else hidden += dirOffset - covered;
     if (hidden > 0) notes.push({ detail: D.HiddenData, bytes: hidden });
+    // A local header in a gap is an entry the central directory does not list. A reader that walks the file from the
+    // start, as streaming unzippers do, extracts it; a reader of the central directory never sees it.
+    for (const [from, to] of gaps) {
+      const at = await findLocalHeader(reader, from, to, deadline);
+      if (at !== undefined) notes.push({ detail: D.HiddenEntry, bytes: to - from, offset: at });
+    }
     return new ZipArchive(reader, entries, notes, deadline);
   }
 

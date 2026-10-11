@@ -6,8 +6,10 @@ import { messageRules } from './msg';
 import { compoundRules } from './objects';
 import { openPackage, unlockWorkbook } from './offcrypto';
 import { inspectPackage } from './package';
+import { CompoundPlan } from './plan';
 import { powerPointRules } from './ppt';
 import { OfficeCategory as C, OfficeDetail as D } from './types';
+import { visioRules } from './vsd';
 import { wordRules } from './word';
 import { excelRules } from './xls';
 import { ZipArchive } from './zip';
@@ -50,7 +52,9 @@ export async function inspectCompound(ctx: RunContext, cfb: CompoundFile): Promi
   if (main.length === 0) throw new StopError(C.Package, D.Unrecognized, 'The compound file holds no Office document stream', { reason: 'a compound file of another kind' });
   const family = main[0];
   ctx.format = formatOf(family, cfb);
-  await compoundRules(ctx, cfb, '', false);
+  const plan = new CompoundPlan();
+  if (family !== 'encrypted') ctx.run.output = { kind: 'cfb', cfb, plan };
+  await compoundRules(ctx, cfb, '', false, plan);
   const stream = (name: string) => {
     const e = cfb.child(cfb.root, name);
     return e?.kind === 'stream' ? e : undefined;
@@ -77,11 +81,13 @@ export async function inspectCompound(ctx: RunContext, cfb: CompoundFile): Promi
     else if (template) ctx.format = f('xlt', 'application/vnd.ms-excel');
     // Excel keeps the data of a workbook's ActiveX controls in one Ctls stream.
     const controls = stream('Ctls');
-    if (controls && controls.size > 0) ctx.report(C.Control, D.ActiveX, controls.name, { stream: controls.name });
+    if (controls && controls.size > 0 && ctx.report(C.Control, D.ActiveX, controls.name, { stream: controls.name }).action === 'strip') plan.drop.add(controls);
   }
-  if (family === 'outlook') await messageRules(ctx, cfb, cfb.root);
+  if (family === 'outlook') await messageRules(ctx, cfb, cfb.root, 0, plan);
   const ppt = stream('PowerPoint Document');
   if (family === 'powerpoint' && ppt) await powerPointRules(ctx, cfb, ppt);
+  const visio = stream('VisioDocument');
+  if (family === 'visio' && visio) await visioRules(ctx, cfb, visio);
   const info = stream('EncryptionInfo');
   const pkg = stream('EncryptedPackage');
   if (family === 'encrypted' && info && pkg) {
@@ -89,7 +95,10 @@ export async function inspectCompound(ctx: RunContext, cfb: CompoundFile): Promi
     const { source } = await openPackage(ctx, cfb, info, pkg);
     const zip = await ZipArchive.open(source, ctx.settings, ctx.settings.deadline);
     for (const n of zip.notes) ctx.report(C.Container, n.detail, pkg.name, { bytes: n.bytes });
-    await inspectPackage(ctx.withZip(zip));
+    // The rewrite writes the package decrypted, since office-defuse does not encrypt.
+    const zctx = ctx.withZip(zip);
+    await inspectPackage(zctx);
+    if (ctx.format) ctx.run.output = { kind: 'zip', zip, plan: zctx.plan, format: ctx.format };
   }
 }
 

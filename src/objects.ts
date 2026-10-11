@@ -1,6 +1,12 @@
-import { type CfbEntry, type CompoundFile, entryPath } from './cfb';
-import { clip, type RunContext } from './context';
-import { type PackagedFile, parseCompObj, parseOleStream, parsePackage } from './oleobj';
+import { type CfbEntry, CompoundFile, entryPath } from './cfb';
+import { writeCfb } from './cfb-writer';
+import { type ContainedDecision, decideContained, presence, spillOf } from './contained';
+import { clip, type Reported, type RunContext } from './context';
+import { StopError } from './errors';
+import { rangeChunks, readAll, SpillSink } from './io';
+import { type PackagedFile, parseCompObj, parseOleStream, parsePackage, replaceSized, sizedStream } from './oleobj';
+import type { CompoundPlan } from './plan';
+import { subtree } from './rewrite-cfb';
 import { OfficeCategory as C, OfficeDetail as D } from './types';
 
 /** The class ids of Equation Editor 3.0 and its kin, which CVE-2017-11882 and CVE-2018-0802 exploit, as oletools lists them. */
@@ -30,22 +36,27 @@ const at = (prefix: string, e: CfbEntry) => [prefix, entryPath(e)].filter(Boolea
 /**
  * The rules every compound file gets: VBA projects, embedded objects and controls, wherever they sit in the tree.
  * `prefix` names where the file sits when it is inside another, and `rootIsObject` says that its root is itself an
- * OLE object's storage, as an object in a presentation or an RTF file is.
+ * OLE object's storage, as an object in a presentation or an RTF file is. `plan`, given for the file the rewrite
+ * writes, collects the storages a strip finding names.
  */
-export async function compoundRules(ctx: RunContext, cfb: CompoundFile, prefix: string, rootIsObject: boolean): Promise<void> {
+export async function compoundRules(ctx: RunContext, cfb: CompoundFile, prefix: string, rootIsObject: boolean, plan?: CompoundPlan, rootDecision?: ContainedDecision): Promise<void> {
   const projects = new Set<CfbEntry>();
+  const drop = (r: Reported, e: CfbEntry) => {
+    if (r.action === 'strip' && e.kind !== 'root') plan?.drop.add(e);
+  };
   for (const e of cfb.entries) {
     if (e.kind === 'stream') continue;
     const child = (name: string) => e.children.find(c => upper(c) === name);
-    // A VBA project: a VBA storage with a dir stream, which names the modules (MS-OVBA 2.2).
+    // A VBA project: a VBA storage with a dir stream, which names the modules (MS-OVBA 2.2). The storage that holds
+    // the project goes, or the VBA storage when that is the root.
     const vba = child('VBA');
     if (vba?.kind === 'storage' && vba.children.some(c => c.kind === 'stream' && upper(c) === 'DIR')) {
       projects.add(e);
-      ctx.report(C.Macro, D.VbaProject, at(prefix, vba), { storage: at(prefix, vba) });
+      drop(ctx.report(C.Macro, D.VbaProject, at(prefix, vba), { storage: at(prefix, vba) }), e.kind === 'root' ? vba : e);
     }
     if (e.kind === 'storage' && (upper(e) === '_VBA_PROJECT_CUR' || upper(e) === 'MACROS') && e.children.length && !projects.has(e)) {
       // Excel's and Word's project storages, without the dir stream a whole project has.
-      ctx.report(C.Macro, D.VbaProject, at(prefix, e), { storage: at(prefix, e) });
+      drop(ctx.report(C.Macro, D.VbaProject, at(prefix, e), { storage: at(prefix, e) }), e);
     }
     const names = new Set(e.children.map(upper));
     const parent = e.parent ? upper(e.parent) : '';
@@ -55,7 +66,7 @@ export async function compoundRules(ctx: RunContext, cfb: CompoundFile, prefix: 
         : [...names].some(n => OBJECT_STREAMS.has(n) || CONTROL_STREAMS.has(n)) ||
           (parent === 'OBJECTPOOL' && e.parent?.parent?.kind === 'root') ||
           (e.parent?.kind === 'root' && /^MBD[0-9A-F]{8}$/i.test(e.name));
-    if (isObject) await objectRules(ctx, cfb, e, at(prefix, e));
+    if (isObject) for (const r of await objectRules(ctx, cfb, e, at(prefix, e), plan, e.kind === 'root' ? rootDecision : undefined)) drop(r, e);
   }
 }
 
@@ -106,33 +117,88 @@ export async function describeObject(cfb: CompoundFile, e: CfbEntry, _location: 
   return info;
 }
 
-/** One OLE object's storage: a control, a linked object, or an embedded one, with what it holds. */
-async function objectRules(ctx: RunContext, cfb: CompoundFile, e: CfbEntry, location: string): Promise<void> {
+/**
+ * Shows an embedded object of the compound file the rewrite writes to the plugins: the file a Packager object holds,
+ * or the object's storage written out as a compound file of its own. Bytes a plugin wrote take the file's place in
+ * the Ole10Native stream, or the storage's place as the storages and streams of the compound file they hold.
+ */
+async function objectFile(ctx: RunContext, cfb: CompoundFile, e: CfbEntry, d: ObjectInfo, location: string, plan: CompoundPlan): Promise<ContainedDecision | undefined> {
+  const run = ctx.run;
+  const native = e.children.find(c => c.kind === 'stream' && upper(c) === '\x01OLE10NATIVE');
+  if (d.pkg?.embedded && native) {
+    const pkg = d.pkg;
+    const source = cfb.source(native);
+    const start = 4 + pkg.dataAt;
+    const length = Math.max(0, Math.min(pkg.size, native.size - start));
+    const decision = await decideContained(ctx, { name: pkg.fileName || undefined, location, chunks: () => rangeChunks(source, start, length) });
+    if (decision?.replacement) {
+      const all = await cfb.bytes(native);
+      plan.replace.set(native, await spillOf(run, sizedStream(replaceSized(all.subarray(4), pkg.dataAt, pkg.size, await readAll(decision.replacement)))));
+    }
+    return decision;
+  }
+  const written = new SpillSink(run.temp, run.threshold);
+  run.held.push(written);
+  await writeCfb(subtree(cfb, e), written, run.deadline);
+  await written.close();
+  const decision = await decideContained(ctx, { name: d.userType || d.progId || undefined, location, chunks: () => written.read() });
+  const replacement = decision?.replacement;
+  if (!replacement) return decision;
+  const source = replacement.source();
+  run.sources.push(source);
+  let graft: CompoundFile;
+  try {
+    graft = await CompoundFile.open(source, ctx.settings, run.deadline);
+  } catch (err) {
+    if (!(err instanceof StopError)) throw err;
+    ctx.removal(C.Embedded, D.PluginFailed, location, { reason: 'its output is not a compound file' });
+    return { keep: false };
+  }
+  plan.grafts.set(e, graft);
+  // The output check writes the storage out again, so it expects the bytes this writer makes of the graft.
+  const again = new SpillSink(run.temp, run.threshold);
+  run.held.push(again);
+  await writeCfb(subtree(graft, graft.root), again, run.deadline);
+  await again.close();
+  const expected = run.kept.get(replacement.digest());
+  if (expected) run.kept.set(again.digest(), expected);
+  return decision;
+}
+
+/**
+ * One OLE object's storage: a control, a linked object, or an embedded one, with what it holds. Returns its findings,
+ * and a strip when a plugin removed the object. In the file the rewrite writes, `plan` is set and an embedded object
+ * goes to the plugins first. `given` is the verdict on an object whose container showed it to the plugins already.
+ */
+async function objectRules(ctx: RunContext, cfb: CompoundFile, e: CfbEntry, location: string, plan?: CompoundPlan, given?: ContainedDecision): Promise<Reported[]> {
   const d = await describeObject(cfb, e, location);
   const data: Record<string, string | number> = { storage: location };
   if (d.clsid) data.clsid = d.clsid;
   if (d.progId) data.progId = clip(d.progId);
   if (d.userType) data.className = clip(d.userType);
-  if (d.control) {
-    ctx.report(C.Control, D.ActiveX, location, d.controlName ? { ...data, name: clip(d.controlName) } : data);
-    return;
-  }
+  if (d.control) return [ctx.report(C.Control, D.ActiveX, location, d.controlName ? { ...data, name: clip(d.controlName) } : data)];
+  const found: Reported[] = [];
   if (d.pkg) {
     Object.assign(data, packageData(d.pkg));
-    if (!d.pkg.embedded && d.pkg.sourcePath) ctx.external(D.Object, d.pkg.sourcePath, location, { storage: location }, 'package link');
+    if (!d.pkg.embedded && d.pkg.sourcePath) found.push(ctx.external(D.Object, d.pkg.sourcePath, location, { storage: location }, 'package link'));
   }
-  if (d.linked) linkedObject(ctx, d, location, { storage: location, ...(d.clsid ? { clsid: d.clsid } : {}) });
-  else ctx.report(C.Embedded, D.OleObject, location, data);
-  if (d.equation) ctx.report(C.Embedded, D.Equation, location, data);
+  if (d.linked) found.push(linkedObject(ctx, d, location, { storage: location, ...(d.clsid ? { clsid: d.clsid } : {}) }));
+  else {
+    const decision = given ?? (plan ? await objectFile(ctx, cfb, e, d, location, plan) : undefined);
+    found.push(ctx.report(C.Embedded, D.OleObject, location, data, presence(decision)));
+    if (decision && !decision.keep) found.push({ action: 'strip' });
+  }
+  if (d.equation) found.push(ctx.report(C.Embedded, D.Equation, location, data));
+  return found;
 }
 
 /**
  * Reports a linked object. A URL moniker's target loads from outside the file whatever its text looks like: a
  * CVE-2017-0199 sample puts a character with a stray high byte where the colon of https: goes.
  */
-export function linkedObject(ctx: RunContext, d: { target: string; url: boolean }, location: string, data: Record<string, string>): void {
-  if (d.target && !d.url) ctx.external(D.Object, d.target, location, data, 'linked object');
-  else ctx.report(C.External, D.Object, location, d.target ? { ...data, target: clip(d.target, 2000) } : data);
+export function linkedObject(ctx: RunContext, d: { target: string; url: boolean }, location: string, data: Record<string, string>): Reported {
+  if (d.target && !d.url) return ctx.external(D.Object, d.target, location, data, 'linked object');
+  return ctx.report(C.External, D.Object, location, d.target ? { ...data, target: clip(d.target, 2000) } : data);
 }
 
 /** What a finding shows of a Packager object's file: its name and paths, and its size when the object holds it. */

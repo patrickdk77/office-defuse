@@ -55,6 +55,11 @@ export class ZipWriter {
     private readonly options: { forceZip64?: boolean } = {},
   ) {}
 
+  /** Bytes written so far: where the next entry's local header goes. */
+  get position(): number {
+    return this.offset;
+  }
+
   private async put(b: Uint8Array): Promise<void> {
     await this.sink.write(b);
     this.offset += b.length;
@@ -73,14 +78,11 @@ export class ZipWriter {
     );
   }
 
-  /** Adds an entry whose compressed bytes come from `chunks` unchanged, such as an entry of the archive being rewritten. */
-  async copy(info: CopiedEntry, chunks: AsyncIterable<Uint8Array>): Promise<void> {
-    if (this.names.has(info.name)) throw new Error(`Entry ${info.name} is already in the archive`);
-    this.names.add(info.name);
+  /** The local header `copy` writes for an entry. */
+  localHeader(info: CopiedEntry): Uint8Array {
     const name = Buffer.from(info.name, 'utf8');
     const flags = /^[\x20-\x7e]*$/.test(info.name) ? 0 : 0x0800;
     const big = this.options.forceZip64 === true || info.size >= MAX32 || info.compressedSize >= MAX32;
-    const localOffset = this.offset;
     const time = info.dosTime ?? 0;
     const date = info.dosDate ?? DOS_DATE;
     const local = new Builder()
@@ -97,7 +99,20 @@ export class ZipWriter {
       .u16(big ? 20 : 0)
       .bytes(name);
     if (big) local.u16(0x0001).u16(16).u64(info.size).u64(info.compressedSize);
-    await this.put(local.build());
+    return local.build();
+  }
+
+  /** Adds an entry whose compressed bytes come from `chunks` unchanged, such as an entry of the archive being rewritten. */
+  async copy(info: CopiedEntry, chunks: AsyncIterable<Uint8Array>): Promise<void> {
+    if (this.names.has(info.name)) throw new Error(`Entry ${info.name} is already in the archive`);
+    this.names.add(info.name);
+    const name = Buffer.from(info.name, 'utf8');
+    const flags = /^[\x20-\x7e]*$/.test(info.name) ? 0 : 0x0800;
+    const big = this.options.forceZip64 === true || info.size >= MAX32 || info.compressedSize >= MAX32;
+    const localOffset = this.offset;
+    const time = info.dosTime ?? 0;
+    const date = info.dosDate ?? DOS_DATE;
+    await this.put(this.localHeader(info));
     let written = 0;
     for await (const c of chunks) {
       written += c.length;

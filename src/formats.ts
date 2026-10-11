@@ -36,6 +36,12 @@ export const OOXML_FORMATS = new Map<string, Format>([
   ['application/vnd.ms-visio.stencil.macroenabled.main+xml', f('vssm', 'application/vnd.ms-visio.stencil.macroEnabled.12')],
 ]);
 
+/** The content type of an XPS package's FixedDocumentSequence, which XPS and OpenXPS share. */
+export const XPS_SEQUENCE = 'application/vnd.ms-package.xps-fixeddocumentsequence+xml';
+
+/** XPS formats, told apart by the relationship type that names the FixedDocumentSequence. */
+export const XPS_FORMATS = { xps: f('xps', 'application/vnd.ms-xpsdocument'), oxps: f('oxps', 'application/oxps') };
+
 /** OpenDocument formats by the media type in the mimetype entry or the manifest, exactly as written. */
 export const ODF_FORMATS = new Map<string, Format>(
   (

@@ -189,6 +189,8 @@ export interface PackagedFile {
   /** False when the data names a file it does not hold, a link. */
   embedded: boolean;
   size: number;
+  /** Where the file's bytes start in the native data. */
+  dataAt: number;
 }
 
 /**
@@ -206,8 +208,8 @@ export function parsePackage(b: Uint8Array): PackagedFile | undefined {
       r.skip(8);
       const tempPath = r.ansiz();
       return bounded<PackagedFile>(
-        () => ({ fileName, sourcePath, tempPath, embedded: true, size: r.u32() }),
-        () => ({ fileName, sourcePath, tempPath, embedded: false, size: 0 }),
+        () => ({ fileName, sourcePath, tempPath, embedded: true, size: r.u32(), dataAt: r.pos }),
+        () => ({ fileName, sourcePath, tempPath, embedded: false, size: 0, dataAt: r.pos }),
       );
     },
     () => undefined,
@@ -223,6 +225,8 @@ export interface Ole1Object {
   itemName: string;
   /** The native data of an embedded object. */
   data?: Uint8Array;
+  /** Where the native data starts in the object's bytes, after the size before it. */
+  dataAt?: number;
 }
 
 export function parseOle1(b: Uint8Array): Ole1Object | undefined {
@@ -237,8 +241,26 @@ export function parseOle1(b: Uint8Array): Ole1Object | undefined {
       const itemName = r.lengthPrefixedAnsi();
       if (formatId === 1) return { formatId, className, topicName, itemName };
       const size = r.u32();
-      return { formatId, className, topicName, itemName, data: r.bytes(Math.min(size, r.left)) };
+      const dataAt = r.pos;
+      return { formatId, className, topicName, itemName, data: r.bytes(Math.min(size, r.left)), dataAt };
     },
     () => undefined,
   );
 }
+
+const le32 = (n: number) => {
+  const b = Buffer.alloc(4);
+  b.writeUInt32LE(n >>> 0);
+  return b;
+};
+
+/**
+ * Data that holds a 32-bit size at `dataAt - 4` and that many bytes at `dataAt`, with `data` in their place and the
+ * size set to match. What came before and after stays. Packager's native data and an OLE 1.0 object have this layout.
+ */
+export function replaceSized(bytes: Uint8Array, dataAt: number, oldSize: number, data: Uint8Array): Uint8Array {
+  return Buffer.concat([bytes.subarray(0, dataAt - 4), le32(data.length), data, bytes.subarray(Math.min(bytes.length, dataAt + oldSize))]);
+}
+
+/** A stream that starts with the size of what follows, such as Ole10Native, around `data`. */
+export const sizedStream = (data: Uint8Array) => Buffer.concat([le32(data.length), data]);

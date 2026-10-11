@@ -1,6 +1,6 @@
 import { expect } from 'chai';
-import { inspectOffice } from '../src';
-import { fixture, kinds, of } from './helpers/util';
+import { disarmOffice, inspectOffice } from '../src';
+import { fixture, kinds, must, of } from './helpers/util';
 
 const ole = (name: string) => fixture('ole', name);
 /** The kinds of what a file holds, without the information findings. */
@@ -140,6 +140,9 @@ describe('fields, links and attachments', () => {
     const local = await inspectOffice(ole('local-template.doc'));
     expect(local.findings.map(f => [`${f.category}/${f.detail}`, f.data])).to.deep.equal([['EXTERNAL/LOCAL_FILE', { source: 'SttbfAssoc', target: 'C:\\Templates\\Inert.dot', kind: 'template' }]]);
     expect(kinds(await inspectOffice(ole('word6-dde.doc')))).to.deep.equal(['DDE/FIELD']);
+    // A Word 6.0 file saved fast is read in the order its piece table gives, so a field split over pieces stored in
+    // reverse order reads whole.
+    expect(kinds(await inspectOffice(ole('word6-pieces.doc')))).to.deep.equal(['DDE/FIELD']);
   });
 
   it('reads Excel DDE, OLE and workbook links, shapes that run macros and hyperlinks', async () => {
@@ -208,8 +211,9 @@ describe('encryption', () => {
       ['password.docx', {}, 'the package is encrypted with a password that is not VelvetSweatshop'],
       ['password.docx', { password: 'wrong' }, 'the package is encrypted with a password that is not VelvetSweatshop'],
       ['rc4-password.xls', {}, 'the workbook is encrypted with a password that is not VelvetSweatshop'],
-      ['word-password.doc', {}, 'The document is encrypted'],
-      ['presentation-password.ppt', {}, 'The presentation is encrypted'],
+      ['word-password.doc', {}, 'an EncryptionHeader of an impossible size'],
+      ['presentation-password.ppt', {}, 'the current edit names no CryptSession10Container'],
+      ['xor.xls', {}, 'the workbook is obfuscated with a password that is not VelvetSweatshop'],
       ['filepass-cut.xls', {}, 'a FILEPASS record cut short'],
       ['package-cut.docx', {}, 'an EncryptedPackage stream cut short'],
       ['package-short.docx', {}, 'an EncryptedPackage stream shorter than the size it gives'],
@@ -231,7 +235,6 @@ describe('encryption', () => {
 
   it('refuses a file encrypted with an algorithm it does not decrypt, and never hands such a name to OpenSSL', async () => {
     const algorithms: Array<[string, string]> = [
-      ['xor.xls', 'XOR obfuscation'],
       ['extensible.docx', 'encryption version 4.3'],
       ['info-cut.docx', 'encryption version 0.0'],
       ['filepass-version.xls', 'encryption version 9.9'],
@@ -258,6 +261,31 @@ describe('encryption', () => {
       ['ENCRYPTED/RC4_OTHER', 'Encryption is RC4 with a 56-bit key'],
     ]);
     expect(kinds(await inspectOffice(ole('agile-sha1.docx')))).to.deep.equal(['ENCRYPTED/DEFAULT_PASSWORD', 'ENCRYPTED/AES_256']);
+    // Word 97 to 2003 with RC4, RC4 CryptoAPI and XOR obfuscation, PowerPoint with RC4 CryptoAPI, and Excel with
+    // XOR obfuscation. Each file holds content only decryption shows.
+    const list = { password: ['wrong', 'inert-password'] };
+    for (const [file, cipher, content] of [
+      ['word-rc4.doc', 'ENCRYPTED/RC4_40', 'DDE/FIELD'],
+      ['word-cryptoapi.doc', 'ENCRYPTED/RC4_128', 'DDE/FIELD'],
+      ['word-xor.doc', 'ENCRYPTED/XOR_OBFUSCATION', 'DDE/FIELD'],
+      ['ppt-cryptoapi.ppt', 'ENCRYPTED/RC4_128', 'LINK/SAFE'],
+      ['xor-password.xls', 'ENCRYPTED/XOR_OBFUSCATION', 'MACRO/XLM_MACROSHEET'],
+    ]) {
+      expect(kinds(await inspectOffice(ole(file))), file).to.deep.equal(['ENCRYPTED/PASSWORD_REQUIRED']);
+      expect(kinds(await inspectOffice(ole(file), list)), file).to.deep.equal(['ENCRYPTED/USER_PASSWORD', cipher, content]);
+    }
+    // PowerPoint opens a presentation encrypted with its own default password without asking, as Excel does with
+    // VelvetSweatshop.
+    const ppt = await inspectOffice(ole('ppt-default.ppt'));
+    expect(ppt.findings.map(f => [`${f.category}/${f.detail}`, f.description])).to.deep.equal([
+      ['ENCRYPTED/DEFAULT_PASSWORD', 'The file is encrypted with /01Hannes Ruescher/01, the password PowerPoint opens it with without asking'],
+      ['ENCRYPTED/RC4_128', 'Encryption is RC4 with a 128-bit key'],
+      ['LINK/SAFE', 'Web or email link'],
+    ]);
+    expect(kinds(await inspectOffice(ole('xor-default.xls')))).to.deep.equal(['ENCRYPTED/DEFAULT_PASSWORD', 'ENCRYPTED/XOR_OBFUSCATION', 'MACRO/XLM_MACROSHEET']);
+    // ChainingModeCFB is CFB with an 8-bit window, decrypted here with AES-ECB.
+    const cfb = await disarmOffice(ole('agile-cfb.docx'));
+    expect([kinds(cfb.before), cfb.after?.format, kinds(must(cfb.after, 'after'))]).to.deep.equal([['ENCRYPTED/DEFAULT_PASSWORD', 'ENCRYPTED/AES_256'], 'docx', []]);
     // Without the key data's salt, Agile segments decrypt with the wrong IVs, and the archive does not read.
     expect(kinds(await inspectOffice(ole('agile-no-salt.docx')))).to.deep.equal(['ENCRYPTED/DEFAULT_PASSWORD', 'ENCRYPTED/AES_256', 'CONTAINER/HEADER_MISMATCH']);
     const trailing = await inspectOffice(ole('agile-trailing.docx'));
@@ -320,5 +348,20 @@ describe('less common records and storages', () => {
       ['EMBEDDED/ATTACHMENT', undefined, '0'],
       ['EXTERNAL/OTHER', 'https://example.invalid/w', undefined],
     ]);
+  });
+});
+
+describe('password lists', () => {
+  it('tries each password of a list in order, each once, then VelvetSweatshop', async () => {
+    const xls = await inspectOffice(ole('rc4-password.xls'), { password: ['first wrong', 'inert-password', 'never tried'] });
+    expect(kinds(xls).slice(0, 2)).to.deep.equal(['ENCRYPTED/USER_PASSWORD', 'ENCRYPTED/RC4_40']);
+    const docx = await inspectOffice(ole('password.docx'), { password: ['wrong', 'wrong', 'inert-password'] });
+    expect(kinds(docx)).to.deep.equal(['ENCRYPTED/USER_PASSWORD', 'ENCRYPTED/AES_256']);
+    // Passwords meant for other files do not keep the default one from opening this one.
+    expect(kinds(await inspectOffice(ole('standard.docx'), { password: ['wrong', 'also wrong'] }))).to.deep.equal(['ENCRYPTED/DEFAULT_PASSWORD', 'ENCRYPTED/AES_128']);
+    // VelvetSweatshop in the list is the caller's password.
+    expect(kinds(await inspectOffice(ole('standard.docx'), { password: ['VelvetSweatshop'] }))).to.deep.equal(['ENCRYPTED/USER_PASSWORD', 'ENCRYPTED/AES_128']);
+    const none = await inspectOffice(ole('password.docx'), { password: [] });
+    expect(kinds(none)).to.deep.equal(['ENCRYPTED/PASSWORD_REQUIRED']);
   });
 });

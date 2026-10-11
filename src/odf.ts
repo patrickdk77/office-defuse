@@ -1,13 +1,15 @@
-import { clip, type ZipContext } from './context';
+import { decideContained, presence } from './contained';
+import { clip, type PlanContext, type Reported, type ZipContext } from './context';
 import { StopError } from './errors';
 import { ODF_FORMATS } from './formats';
-import { callsDde } from './formulas';
+import { callsDde, formulaCalls } from './formulas';
 import { isFragment, isInsidePackage } from './links';
+import { attributeKey, type ElementEdit } from './plan';
 import { OfficeCategory as C, OfficeDetail as D } from './types';
 import type { XmlElement, XmlHandler } from './xml';
 import { nameKey, type ZipEntry } from './zip';
 
-const NS = {
+export const NS = {
   manifest: 'urn:oasis:names:tc:opendocument:xmlns:manifest:1.0',
   office: 'urn:oasis:names:tc:opendocument:xmlns:office:1.0',
   script: 'urn:oasis:names:tc:opendocument:xmlns:script:1.0',
@@ -19,6 +21,7 @@ const NS = {
   meta: 'urn:oasis:names:tc:opendocument:xmlns:meta:1.0',
   style: 'urn:oasis:names:tc:opendocument:xmlns:style:1.0',
   database: 'urn:oasis:names:tc:opendocument:xmlns:database:1.0',
+  chart: 'urn:oasis:names:tc:opendocument:xmlns:chart:1.0',
   xlink: 'http://www.w3.org/1999/xlink',
 };
 
@@ -64,30 +67,62 @@ function odfNs(ns: string): string {
 }
 
 /** An attribute by normalized namespace and local name. */
-function oattr(el: XmlElement, ns: string, local: string): string | undefined {
+export function oattr(el: XmlElement, ns: string, local: string): string | undefined {
   for (const a of el.attributes) if (a.local === local && odfNs(a.ns) === ns) return a.value;
   return undefined;
 }
 
-/** A path inside the package as the manifest and the zip name it: without "./" and leading slashes. */
-const packagePath = (href: string) => nameKey(href.trim().replace(/^(\.\/)+/, ''));
+/** The ODF_NS-normalized namespace of `ns`, exported for the rewrite. */
+export const odfNamespace = (ns: string) => odfNs(ns);
 
-/** The rules that read inside one XML entry of an ODF package. */
-class EntryRules implements XmlHandler {
+/** The edit that takes an element's xlink:href away, under whatever namespace URI the attribute has. */
+function stripHref(el: XmlElement): ElementEdit {
+  return { strip: new Set(el.attributes.filter(a => a.local === 'href' && odfNs(a.ns) === NS.xlink).map(a => attributeKey(a.ns, a.local))) };
+}
+
+/** The xlink:href of an element, for the rewrite. */
+export const hrefOf = (el: XmlElement) => oattr(el, NS.xlink, 'href');
+
+/** A path inside the package as the manifest and the zip name it: without "./" and leading slashes. */
+export const packagePath = (href: string) => nameKey(href.trim().replace(/^(\.\/)+/, ''));
+
+/**
+ * The rules that read inside one XML entry of an ODF package, or inside a flat OpenDocument file. A flat file has no
+ * entries, so in one every relative reference names a file beside the document, which loads from outside it.
+ */
+export class EntryRules implements XmlHandler {
   /** Depth of the office:scripts element being read, 0 outside one. */
   private scriptsDepth = 0;
   /** An office:script element being read, with whether it holds anything. */
-  private script?: { depth: number; language: string; content: boolean };
+  private script?: { depth: number; language: string; content: boolean; index: number };
+  /** A link element being read, whose text and title go into the label check at its end. */
+  private label?: { index: number; href: string; text: string; title?: string; unwrap: boolean };
 
   constructor(
-    private readonly ctx: ZipContext,
+    private readonly ctx: PlanContext,
     private readonly entry: string,
     /** Whether an object refers to each entry, by key. Only entries are kept, so a part full of references costs no memory. */
     private readonly oleRefs: Map<string, boolean>,
+    private readonly flat = false,
   ) {}
 
-  private report(category: C, detail: D, data?: Record<string, string | number>): void {
-    this.ctx.report(category, detail, this.entry, data);
+  /**
+   * Whether a reference names an entry of the package. LibreOffice's vnd.sun.star.Package: URLs name one too. In a
+   * flat file no entry exists, so only such a URL stays inside, naming nothing.
+   */
+  private inside(href: string): boolean {
+    const own = /^\s*vnd\.sun\.star\.package:(.*)$/is.exec(href);
+    if (own) return this.flat || isInsidePackage(own[1]);
+    return !this.flat && isInsidePackage(href);
+  }
+
+  private report(category: C, detail: D, data?: Record<string, string | number>): Reported {
+    return this.ctx.report(category, detail, this.entry, data);
+  }
+
+  /** Records the edit for the element when the finding strips. */
+  private edit(r: Reported, el: XmlElement, edit: ElementEdit = { remove: true }): void {
+    if (r.action === 'strip') this.ctx.plan.element(this.entry, el.index, edit);
   }
 
   start(raw: XmlElement): void {
@@ -96,41 +131,65 @@ class EntryRules implements XmlHandler {
     const key = `${el.ns} ${el.local}`;
     const href = oattr(el, NS.xlink, 'href');
     if (el.ns === NS.office && el.local === 'scripts' && !this.scriptsDepth) this.scriptsDepth = el.depth;
-    else if (el.ns === NS.office && el.local === 'script') this.script = { depth: el.depth, language: oattr(el, NS.script, 'language') ?? '', content: false };
+    else if (el.ns === NS.office && el.local === 'script') this.script = { depth: el.depth, language: oattr(el, NS.script, 'language') ?? '', content: false, index: el.index };
     else if (el.ns === NS.script && el.local === 'event-listener') this.scriptEvent(el, href);
     else if (el.ns === NS.presentation && el.local === 'event-listener') this.presentationEvent(el, href);
     else if ((el.ns === NS.text && el.local === 'dde-connection-decl') || (el.ns === NS.office && el.local === 'dde-source')) {
-      this.report(C.Dde, D.Link, { application: clip(oattr(el, NS.office, 'dde-application') ?? ''), topic: clip(oattr(el, NS.office, 'dde-topic') ?? '') });
+      this.edit(this.report(C.Dde, D.Link, { application: clip(oattr(el, NS.office, 'dde-application') ?? ''), topic: clip(oattr(el, NS.office, 'dde-topic') ?? '') }), raw);
     } else if (el.ns === NS.draw && el.local === 'applet') {
-      this.report(C.Embedded, D.Applet, { code: clip(oattr(el, NS.draw, 'code') ?? ''), ...(href ? { target: clip(href) } : {}) });
+      this.edit(this.report(C.Embedded, D.Applet, { code: clip(oattr(el, NS.draw, 'code') ?? ''), ...(href ? { target: clip(href) } : {}) }), raw);
       return;
     } else if (el.ns === NS.draw && el.local === 'plugin') {
-      this.report(C.Embedded, D.Plugin, { mimeType: clip(oattr(el, NS.draw, 'mime-type') ?? ''), ...(href ? { target: clip(href) } : {}) });
+      this.edit(this.report(C.Embedded, D.Plugin, { mimeType: clip(oattr(el, NS.draw, 'mime-type') ?? ''), ...(href ? { target: clip(href) } : {}) }), raw);
       return;
-    } else if (el.ns === NS.draw && el.local === 'object-ole' && (href === undefined || isInsidePackage(href))) {
-      this.report(C.Embedded, D.OleObject, href ? { target: clip(href) } : undefined);
+    } else if (el.ns === NS.draw && el.local === 'object-ole' && (href === undefined || this.inside(href))) {
+      // The object's entry may still be ahead in the archive, so its plugin verdict decides this element later. The
+      // preview image beside the element stays either way.
+      const r = this.report(C.Embedded, D.OleObject, href ? { target: clip(href) } : undefined);
+      this.ctx.plan.objects.push({ part: this.entry, index: el.index, target: href ? packagePath(href) : '', finding: r.finding, strips: r.action === 'strip' });
       if (href && this.oleRefs.has(packagePath(href))) this.oleRefs.set(packagePath(href), true);
     }
     for (const a of el.attributes) {
-      if (odfNs(a.ns) === NS.table && (a.local === 'formula' || a.local === 'expression') && callsDde(a.value)) this.report(C.Dde, D.Formula, { formula: clip(a.value) });
+      // The cell keeps its value without the formula.
+      if (odfNs(a.ns) !== NS.table || (a.local !== 'formula' && a.local !== 'expression')) continue;
+      const strip = { strip: new Set([attributeKey(a.ns, a.local)]) };
+      if (callsDde(a.value)) this.edit(this.report(C.Dde, D.Formula, { formula: clip(a.value) }), raw, strip);
+      for (const [fn, kind] of formulaCalls(a.value)) this.edit(this.report(kind === 'fetch' ? C.External : C.Macro, D.Formula, { function: clip(fn), formula: clip(a.value) }), raw, strip);
     }
     if (href === undefined || isFragment(href) || (el.ns === NS.script && el.local === 'event-listener') || (el.ns === NS.presentation && el.local === 'event-listener')) return;
     // A database document names its own embedded database this way.
     if (el.ns === NS.database && el.local === 'connection-resource' && /^sdbc:embedded:/i.test(href.trim())) return;
-    if (LINK_ELEMENTS.has(key) || (el.ns === NS.form && el.local !== 'form')) this.ctx.link(href, this.entry, { element: clip(el.qname) });
-    else if ((ALWAYS_OUTSIDE.has(key) || !isInsidePackage(href)) && !(el.ns === NS.form && el.local === 'form')) {
-      this.ctx.external(EXTERNAL_KIND.get(key) ?? D.Other, href, this.entry, { element: clip(el.qname) }, clip(el.local));
+    // A chart names the document that holds it, its data source, as "..".
+    if (el.ns === NS.chart && el.local === 'chart' && /^\.\.\/?$/.test(href.trim())) return;
+    if (LINK_ELEMENTS.has(key)) {
+      // The text of a link stays without it. An image map area is nothing but its link.
+      const r = this.ctx.link(href, this.entry, { element: clip(el.qname) });
+      this.edit(r, raw, el.local === 'a' ? { unwrap: true } : { remove: true });
+      if (r.action !== 'strip' && !this.label) this.label = { index: el.index, href, text: '', title: oattr(el, NS.office, 'title') ?? oattr(el, NS.xlink, 'title'), unwrap: el.local === 'a' };
+    } else if (el.ns === NS.form && el.local === 'form') {
+      // A form's own href is where it sends its fields, which goes as pdf-defuse's form submit actions go.
+      this.edit(this.report(C.Action, D.SubmitForm, { element: clip(el.qname), target: clip(href, 2000) }), raw, stripHref(raw));
+    } else if (el.ns === NS.form) this.edit(this.ctx.link(href, this.entry, { element: clip(el.qname) }), raw, stripHref(raw));
+    else if (ALWAYS_OUTSIDE.has(key) || !this.inside(href)) {
+      this.edit(this.ctx.external(EXTERNAL_KIND.get(key) ?? D.Other, href, this.entry, { element: clip(el.qname) }, clip(el.local)), raw);
     }
   }
 
   text(t: string): void {
     if (this.script && t.trim()) this.script.content = true;
+    if (this.label && this.label.text.length < 4096) this.label.text += t;
   }
 
   end(el: XmlElement): void {
+    const label = this.label;
+    if (label && label.index === el.index) {
+      this.label = undefined;
+      const r = this.ctx.labelMismatch(label.href, [label.text, label.title], this.entry, { element: clip(el.qname) });
+      if (r) this.edit(r, el, label.unwrap ? { unwrap: true } : { remove: true });
+    }
     if (this.scriptsDepth === el.depth && odfNs(el.ns) === NS.office && el.local === 'scripts') this.scriptsDepth = 0;
     if (this.script && this.script.depth === el.depth) {
-      if (this.script.content) this.report(C.Macro, /basic/i.test(this.script.language) ? D.OdfBasic : D.OdfScripts, { language: clip(this.script.language) });
+      if (this.script.content) this.edit(this.report(C.Macro, /basic/i.test(this.script.language) ? D.OdfBasic : D.OdfScripts, { language: clip(this.script.language) }), el, { remove: true });
       this.script = undefined;
     }
   }
@@ -148,16 +207,15 @@ class EntryRules implements XmlHandler {
       .replace(/-/g, '');
     const onOpen = ON_OPEN.has(name) || (this.scriptsDepth > 0 && ON_OPEN_DOCUMENT.has(name));
     const data = { event: clip(event), target: clip(target), language: clip(oattr(el, NS.script, 'language') ?? '') };
-    if (onOpen) this.report(C.Macro, D.EventOnOpen, data);
-    else this.report(C.Macro, D.Event, data);
+    this.edit(this.report(C.Macro, onOpen ? D.EventOnOpen : D.Event, data), el);
   }
 
   private presentationEvent(el: XmlElement, href: string | undefined): void {
     const action = oattr(el, NS.presentation, 'action') ?? '';
     const data = { event: clip(oattr(el, NS.script, 'event-name') ?? ''), action: clip(action), ...(href ? { target: clip(href) } : {}) };
-    if (action === 'execute') this.report(C.Action, D.RunProgram, data);
-    else if (action === 'verb') this.report(C.Action, D.OleVerb, data);
-    else if (href !== undefined && !isFragment(href)) this.ctx.link(href, this.entry, data);
+    if (action === 'execute') this.edit(this.report(C.Action, D.RunProgram, data), el);
+    else if (action === 'verb') this.edit(this.report(C.Action, D.OleVerb, data), el);
+    else if (href !== undefined && !isFragment(href)) this.edit(this.ctx.link(href, this.entry, data), el);
   }
 }
 
@@ -193,7 +251,7 @@ async function readManifest(ctx: ZipContext, entry: ZipEntry): Promise<Manifest>
 }
 
 /** The code folder an entry sits in, as the folder's path and its finding. */
-function folderOf(name: string): { prefix: string; detail: D; category: C } | undefined {
+export function folderOf(name: string): { prefix: string; detail: D; category: C } | undefined {
   const segs = name.split('/');
   for (let i = 0; i < segs.length - 1; i++) {
     const hit = FOLDERS.find(([folder]) => folder === segs[i].toLowerCase());
@@ -241,6 +299,8 @@ export async function inspectOdf(ctx: ZipContext): Promise<void> {
   const folders = new Map<string, { detail: D; category: C; entries: number }>();
   const oleRefs = new Map(zip.entries.map(e => [nameKey(e.name), false]));
   const oleEntries: ZipEntry[] = [];
+  /** Entries that are whole files in formats of their own, such as pictures, which go to the plugins. */
+  const wholeFiles: ZipEntry[] = [];
   for (const entry of zip.entries) {
     if (entry === mimetype || entry === manifestEntry) continue;
     const folder = folderOf(entry.name);
@@ -255,13 +315,53 @@ export async function inspectOdf(ctx: ZipContext): Promise<void> {
       await ctx.drain(entry);
     } else if (!entry.directory && /\.xml$/i.test(entry.name)) await ctx.parse(entry, new EntryRules(ctx, entry.name, oleRefs));
     else if (await ctx.drain(entry)) oleEntries.push(entry);
+    else if (!entry.directory && !/^meta-inf\//i.test(entry.name)) wholeFiles.push(entry);
   }
-  for (const [prefix, f] of folders) ctx.report(f.category, f.detail, prefix, { entries: f.entries });
-  for (const e of oleEntries) if (!oleRefs.get(nameKey(e.name))) ctx.report(C.Embedded, D.OleFile, e.name, { part: e.name });
+  const plan = ctx.plan;
+  // A folder goes whole, its empty files with it.
+  for (const [prefix, f] of folders) if (ctx.report(f.category, f.detail, prefix, { entries: f.entries }).action === 'strip') plan.folders.add(`${nameKey(prefix)}/`);
+  // OLE entries go to the plugins. When none takes one, the elements that refer to it decide, or EMBEDDED/OLE_FILE.
+  const decided = new Map<string, boolean>();
+  for (const e of oleEntries) {
+    const key = nameKey(e.name);
+    const decision = await decideContained(ctx, { name: e.name, location: e.name, chunks: () => zip.read(e) });
+    if (decision) {
+      decided.set(key, decision.keep);
+      if (!decision.keep) plan.drop.add(key);
+      else if (decision.replacement) plan.replace.set(key, decision.replacement);
+    }
+    if (!oleRefs.get(key)) {
+      const r = ctx.report(C.Embedded, D.OleFile, e.name, { part: e.name }, presence(decision));
+      if (!decision && r.action === 'strip') plan.drop.add(key);
+    }
+  }
+  // A whole file no plugin takes stays, since no rule names it.
+  for (const e of wholeFiles) {
+    const decision = await decideContained(ctx, { name: e.name, location: e.name, chunks: () => zip.read(e) });
+    if (decision && !decision.keep) plan.drop.add(nameKey(e.name));
+    else if (decision?.replacement) plan.replace.set(nameKey(e.name), decision.replacement);
+  }
+  const files = new Set(zip.entries.filter(e => !e.directory).map(e => nameKey(e.name)));
+  for (const o of plan.objects) {
+    const kept = decided.get(o.target);
+    if (kept === true) {
+      // A plugin kept the object's file, so the object stays.
+      if (o.finding) {
+        o.finding.action = 'info';
+        ctx.run.superseded.add(o.finding);
+      }
+      continue;
+    }
+    if (kept === false || o.strips) {
+      plan.element(o.part, o.index, { remove: true });
+      if (files.has(o.target)) plan.drop.add(o.target);
+    }
+  }
   if (manifest) {
     for (const e of zip.entries) {
       if (e.directory || e === mimetype || e === manifestEntry || /^meta-inf\//i.test(e.name)) continue;
-      if (!manifest.paths.has(nameKey(e.name))) ctx.report(C.Package, D.UnreferencedPart, e.name, { part: e.name });
+      if (!manifest.paths.has(nameKey(e.name)) && ctx.report(C.Package, D.UnreferencedPart, e.name, { part: e.name }).action === 'strip') plan.drop.add(nameKey(e.name));
     }
   }
+  plan.odf = { mimetype, manifest: manifestEntry, mediaType: type };
 }

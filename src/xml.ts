@@ -45,6 +45,17 @@ export interface XmlElement {
    */
   start: number;
   end: number;
+  /** The element's position among the elements of the part, from 0, counting those in entity text. */
+  index: number;
+  /** The namespace declarations of the start tag, as prefix ('' for the default namespace) and URI, defaults included. */
+  namespaces: Array<[string, string]>;
+  /** Written as an empty-element tag. */
+  empty: boolean;
+  /**
+   * The start tag does not say on its own what the attributes are: a value refers to an entity the internal subset
+   * declares, or an attribute-list declaration added a default or normalized a value.
+   */
+  rewritten: boolean;
 }
 
 export interface XmlHandler {
@@ -106,6 +117,12 @@ export interface XmlExternalReference {
 export interface XmlNotes {
   doctype?(d: XmlDoctype): void;
   externalEntity?(r: XmlExternalReference): void;
+  /**
+   * A reference to an internal entity in content, outside any other entity's text, at these offsets. The events of
+   * its text come between this call and `referenceEnd`.
+   */
+  referenceStart?(start: number, end: number): void;
+  referenceEnd?(): void;
 }
 
 export interface XmlOptions {
@@ -150,6 +167,23 @@ const NAME_END = /[\s>[\]"'%;&<]/;
 const TOKENIZED_TYPES = new Set(['ID', 'IDREF', 'IDREFS', 'ENTITY', 'ENTITIES', 'NMTOKEN', 'NMTOKENS']);
 
 const LIMIT_DETAILS = new Set<D>([D.XmlDepth, D.XmlTokenSize, D.XmlEntityDepth, D.XmlEntityExpansions, D.XmlEntitySize]);
+
+export type XmlEncoding = 'utf-8' | 'utf-16le' | 'utf-16be';
+
+/**
+ * The encoding of an XML part from its first four bytes, as XML 1.0 Appendix F tells it, and the length of its byte
+ * order mark. Undefined for UTF-32, which no Office application reads.
+ */
+export function detectEncoding(b: Uint8Array): { encoding: XmlEncoding; bom: number } | undefined {
+  const at = (i: number) => (i < b.length ? b[i] : -1);
+  if ((at(0) === 0 && at(1) === 0) || (at(0) === 0xff && at(1) === 0xfe && at(2) === 0 && at(3) === 0) || (at(0) === 0x3c && at(1) === 0 && at(2) === 0 && at(3) === 0)) return undefined;
+  if (at(0) === 0xef && at(1) === 0xbb && at(2) === 0xbf) return { encoding: 'utf-8', bom: 3 };
+  if (at(0) === 0xff && at(1) === 0xfe) return { encoding: 'utf-16le', bom: 2 };
+  if (at(0) === 0xfe && at(1) === 0xff) return { encoding: 'utf-16be', bom: 2 };
+  if (at(0) === 0x3c && at(1) === 0 && at(2) === 0x3f && at(3) === 0) return { encoding: 'utf-16le', bom: 0 };
+  if (at(0) === 0 && at(1) === 0x3c && at(2) === 0 && at(3) === 0x3f) return { encoding: 'utf-16be', bom: 0 };
+  return { encoding: 'utf-8', bom: 0 };
+}
 
 const isSpace = (c: number) => c === 0x20 || c === 0x09 || c === 0x0a || c === 0x0d;
 /** A character XML 1.0 allows. The decoders leave no lone surrogates, so the halves of a pair pass here. */
@@ -303,7 +337,11 @@ export class XmlTokenizer {
   private doctypeSeen = false;
   /** The XML declaration says standalone="yes". */
   private standalone = false;
-  private encoding: 'utf-8' | 'utf-16le' | 'utf-16be' = 'utf-8';
+  private encoding: XmlEncoding = 'utf-8';
+  /** Start tags read so far, which numbers the elements. */
+  private elements = 0;
+  /** An attribute value of the tag being read referred to an entity of the internal subset. */
+  private generalReference = false;
   /** The last text piece ended in CR, so an LF that starts the next piece belongs to the same line end. */
   private lastCr = false;
   private scan?: DoctypeScan;
@@ -367,24 +405,13 @@ export class XmlTokenizer {
   /** Picks the encoding from the first bytes, as XML 1.0 Appendix F does, and reads the bytes held so far. */
   private begin(): TextDecoder {
     const b = this.head;
-    const at = (i: number) => (i < b.length ? b[i] : -1);
-    if ((at(0) === 0 && at(1) === 0) || (at(0) === 0xff && at(1) === 0xfe && at(2) === 0 && at(3) === 0) || (at(0) === 0x3c && at(1) === 0 && at(2) === 0 && at(3) === 0)) {
-      this.stop(D.Encoding, 'UTF-32 is not an encoding Office reads');
-    }
-    let skip = 0;
-    if (at(0) === 0xef && at(1) === 0xbb && at(2) === 0xbf) skip = 3;
-    else if (at(0) === 0xff && at(1) === 0xfe) {
-      this.encoding = 'utf-16le';
-      skip = 2;
-    } else if (at(0) === 0xfe && at(1) === 0xff) {
-      this.encoding = 'utf-16be';
-      skip = 2;
-    } else if (at(0) === 0x3c && at(1) === 0 && at(2) === 0x3f && at(3) === 0) this.encoding = 'utf-16le';
-    else if (at(0) === 0 && at(1) === 0x3c && at(2) === 0 && at(3) === 0x3f) this.encoding = 'utf-16be';
+    const found = detectEncoding(b);
+    if (!found) return this.stop(D.Encoding, 'UTF-32 is not an encoding Office reads');
+    this.encoding = found.encoding;
     const decoder = new TextDecoder(this.encoding, { fatal: true, ignoreBOM: true });
     this.decoder = decoder;
     this.head = new Uint8Array(0);
-    this.feed(this.decode(decoder, b.subarray(skip), true), false);
+    this.feed(this.decode(decoder, b.subarray(found.bom), true), false);
     return decoder;
   }
 
@@ -580,6 +607,7 @@ export class XmlTokenizer {
       return;
     }
     this.enter(name, e.text);
+    if (!this.span) this.notes.referenceStart?.(start, end);
     const { buf, pos, base, floor, span: outer } = this;
     this.buf = e.text;
     this.pos = 0;
@@ -594,6 +622,7 @@ export class XmlTokenizer {
     this.floor = floor;
     this.span = outer;
     this.active.pop();
+    if (!outer) this.notes.referenceEnd?.();
   }
 
   /** A reference to a general entity in an attribute value. Its text is normalized into the value. */
@@ -601,6 +630,7 @@ export class XmlTokenizer {
     const e = this.entity(name);
     if (!('text' in e)) this.malformed(`A reference to external entity "${name}" in an attribute value`);
     this.enter(name, e.text);
+    this.generalReference = true;
     const value = this.attributeValue(e.text, true);
     this.active.pop();
     return value;
@@ -1018,6 +1048,7 @@ export class XmlTokenizer {
     const qname = body.slice(0, i);
     const raw: Array<[string, string]> = [];
     let selfClosing = this.vml && qname.toLowerCase() === 'br';
+    this.generalReference = false;
     for (;;) {
       const before = i;
       while (i < n && isSpace(body.charCodeAt(i))) i++;
@@ -1045,16 +1076,21 @@ export class XmlTokenizer {
     // Attribute-list declarations normalize the attributes they type, and add the defaults the tag leaves out. Each
     // default added counts against the entity limits, so declarations cannot multiply the work of a long part.
     const declared = this.declared.get(qname);
+    let rewritten = this.generalReference;
     if (declared) {
       const given = new Set<string>();
       for (const a of raw) {
         given.add(a[0]);
-        if (declared.tokenized.has(a[0])) a[1] = tokenize(a[1]);
+        if (!declared.tokenized.has(a[0])) continue;
+        const v = tokenize(a[1]);
+        if (v !== a[1]) rewritten = true;
+        a[1] = v;
       }
       for (const [name, value] of declared.defaults) {
         if (given.has(name)) continue;
         this.charge(value.length);
         raw.push([name, value]);
+        rewritten = true;
       }
     }
     const scope = new Map<string, string>();
@@ -1077,7 +1113,7 @@ export class XmlTokenizer {
     }
     const depth = this.stack.length + 1;
     if (depth > this.limits.depth) this.stop(D.XmlDepth, `Elements nest deeper than ${this.limits.depth}`);
-    const el: XmlElement = { ns: '', local: '', qname, attributes: [], depth, start, end };
+    const el: XmlElement = { ns: '', local: '', qname, attributes: [], depth, start, end, index: this.elements++, namespaces: [...scope], empty: selfClosing, rewritten };
     const open: Open = { el, scope: scope.size ? scope : undefined };
     this.stack.push(open);
     const [prefix, local] = this.split(qname);

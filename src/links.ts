@@ -129,3 +129,104 @@ export const isInsidePackage = (rawHref: string) => inside(clean(rawHref)) && in
 
 /** Whether an OOXML relationship target is not a part name, whatever TargetMode says: a scheme, a drive or a network path. */
 export const isAbsoluteTarget = (rawTarget: string) => [rawTarget, decoded(rawTarget)].some(t => SCHEME.test(clean(t)) || t.startsWith('\\') || t.startsWith('//'));
+
+/** A host as LabelSites compares it. */
+const siteName = (h: string) =>
+  h
+    .toLowerCase()
+    .replace(/^www\./, '')
+    .replace(/\.$/, '');
+
+/**
+ * The hosts a label names, as a lookup: has() answers whether a host is one of them or a subdomain of one, or one of
+ * them is a subdomain of the host. No public-suffix list is needed: evil.co.uk is not under mybank.co.uk. The same
+ * comparison as pdf-defuse's.
+ */
+export class LabelSites {
+  private readonly hosts = new Set<string>();
+  /** Every domain some label host is a subdomain of. */
+  private readonly parents = new Set<string>();
+  constructor(names: string[]) {
+    for (const n of names) {
+      const x = siteName(n);
+      this.hosts.add(x);
+      for (let i = x.indexOf('.'); i >= 0; i = x.indexOf('.', i + 1)) this.parents.add(x.slice(i + 1));
+    }
+  }
+  get size(): number {
+    return this.hosts.size;
+  }
+  has(host: string): boolean {
+    const y = siteName(host);
+    if (this.hosts.has(y) || this.parents.has(y)) return true;
+    for (let i = y.indexOf('.'); i >= 0; i = y.indexOf('.', i + 1)) if (this.hosts.has(y.slice(i + 1))) return true;
+    return false;
+  }
+}
+
+/**
+ * Top-level domains a bare host in a label may end in: the common generic ones and the country codes. A name that
+ * ends in anything else, such as an Excel function (BETA.DIST) or a file (moon.htm), is not read as an address.
+ */
+const TLDS = new Set(
+  (
+    'com net org edu gov mil int info biz name pro mobi asia tel travel jobs museum aero coop app dev io ai co me tv cc ly ' +
+    'xyz online site top shop club store tech live page blog cloud email link news ' +
+    'ac ad ae af ag ai al am ao aq ar as at au aw ax az ba bb bd be bf bg bh bi bj bm bn bo br bs bt bw by bz ca cd cf cg ' +
+    'ch ci ck cl cm cn cr cu cv cw cx cy cz de dj dk dm do dz ec ee eg er es et eu fi fj fk fm fo fr ga gd ge gf gg gh gi ' +
+    'gl gm gn gp gq gr gs gt gu gw gy hk hm hn hr ht hu id ie il im in iq ir is it je jm jo jp ke kg kh ki km kn kp kr kw ' +
+    'ky kz la lb lc li lk lr ls lt lu lv ma mc md mg mh mk ml mm mn mo mp mq mr ms mt mu mv mw mx my mz na nc ne nf ng ni ' +
+    'nl no np nr nu nz om pa pe pf pg ph pk pl pm pn pr ps pt pw py qa re ro rs ru rw sa sb sc sd se sg sh si sk sl sm sn ' +
+    'so sr ss st su sv sx sy sz tc td tf tg th tj tk tl tm tn to tr tt tw tz ua ug uk us uy uz va vc ve vg vi vn vu wf ws ' +
+    'ye yt za zm zw'
+  ).split(' '),
+);
+
+/** The most of a label that is read. */
+const MAX_LABEL = 4096;
+
+/**
+ * The site a label names when the label is itself an address: a web URL, a mail address, or a host with or without a
+ * path that starts with www. or ends in a known top-level domain. Text that only mentions an address, an Excel
+ * function name and a file name name no site. Excel's function names are all capitals, as typed hosts never are, so
+ * a bare host in capitals counts only after WWW.
+ */
+export function labelSite(raw: string): string | undefined {
+  const t = raw
+    .slice(0, MAX_LABEL)
+    .replace(/\p{Cc}/gu, '')
+    .trim();
+  if (/^https?:\/\//i.test(t)) {
+    try {
+      return new URL(t).hostname.toLowerCase() || undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  const mail = /^(?:mailto:)?[^\s@/]+@([a-z0-9-]+(?:\.[a-z0-9-]+)+)$/i.exec(t);
+  const host = mail?.[1] ?? /^([a-z0-9-]+(?:\.[a-z0-9-]+)+)(?::\d+)?(?:[/?#]\S*)?$/i.exec(t)?.[1];
+  if (!host) return undefined;
+  const h = host.toLowerCase();
+  if (h.startsWith('www.')) return h;
+  if (!mail && host === host.toUpperCase() && /[A-Z]/.test(host)) return undefined;
+  return TLDS.has(h.slice(h.lastIndexOf('.') + 1)) ? h : undefined;
+}
+
+/**
+ * The first label of a safe link that is an address, and an address of another site than the one the link opens, or
+ * undefined. A label is text the reader sees for the link: its text, its tooltip, a display name. A subdomain or a
+ * parent of the label's site counts as the same site, as in pdf-defuse. A target that fails on its own gets its own
+ * finding instead.
+ */
+export function mismatchedLabel(target: string, labels: ReadonlyArray<string | undefined>): string | undefined {
+  if (!labels.some(Boolean)) return undefined;
+  const v = checkLink(target);
+  if (v.category !== C.Link || v.detail !== D.Safe || !v.host) return undefined;
+  for (const label of labels) {
+    const site = label ? labelSite(label) : undefined;
+    // A site without a dot, where the target has one, is a label cut short or a local alias, and names no site.
+    if (!site || (!site.includes('.') && v.host.includes('.'))) continue;
+    if (!new LabelSites([site]).has(v.host)) return label;
+  }
+  return undefined;
+}

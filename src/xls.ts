@@ -2,6 +2,7 @@ import { autoName, type BiffRecord, parseBoundSheet, parseLbl, R, RecordReader, 
 import type { CfbEntry, CompoundFile } from './cfb';
 import { clip, type RunContext } from './context';
 import { StopError } from './errors';
+import { type BiffNameRef, biffCalls } from './formulas';
 import { isFragment } from './links';
 import { ByteReader, bounded, readMoniker, utf16 } from './oleobj';
 import { OfficeCategory as C, OfficeDetail as D } from './types';
@@ -24,7 +25,20 @@ interface SupBook {
   /** Whether ExternName records after it name OLE objects, and whether they name DDE items. */
   ole: boolean;
   dde: boolean;
+  /** The names its ExternName records give, in order, which a formula refers to by index. */
+  names: string[];
 }
+
+/** Record types of cell formulas (MS-XLS 2.4.127, 2.4.260 and 2.4.4): FORMULA, SHRFMLA and ARRAY. */
+const FORMULA = 0x0006;
+const SHRFMLA = 0x04bc;
+const ARRAY = 0x0221;
+/** Where the parsed formula starts in each: its cce, then its rgce. */
+const FORMULA_AT = new Map([
+  [FORMULA, 20],
+  [SHRFMLA, 8],
+  [ARRAY, 12],
+]);
 
 /**
  * Inspects an Excel 5.0 to 2003 workbook stream. Excel reads the globals substream from the start of the stream,
@@ -42,6 +56,9 @@ export async function excelRules(ctx: RunContext, cfb: CompoundFile, stream: Cfb
   let decrypt: Decrypt = r => r.body;
   const sheets: Sheet[] = [];
   const books: SupBook[] = [];
+  const names: string[] = [];
+  /** The SupBook each XTI of the ExternSheet record names. */
+  const xti: number[] = [];
   const flags = { template: false, addIn: false };
   for (let r = await records.next(); r && r.type !== R.eof; r = await records.next()) {
     if (r.type === R.filePass) {
@@ -54,12 +71,17 @@ export async function excelRules(ctx: RunContext, cfb: CompoundFile, stream: Cfb
     else if (r.type === R.addIn) flags.addIn = true;
     else if (r.type === R.lbl) {
       const name = parseLbl(body, biff8);
+      names.push(name.name);
       const auto = autoName(name.name);
       if (auto) ctx.report(C.Macro, auto.onOpen ? D.EventOnOpen : D.Event, location, { event: auto.event, name: clip(name.name) });
     } else if (r.type === R.supBook && body.length >= 4) {
       const cch = body[2] | (body[3] << 8);
-      books.push({ ctab: body[0] | (body[1] << 8), cch, path: cch > 0 && cch <= 0xff ? xlString(body, 4, cch).text : '', ole: false, dde: false });
+      books.push({ ctab: body[0] | (body[1] << 8), cch, path: cch > 0 && cch <= 0xff ? xlString(body, 4, cch).text : '', ole: false, dde: false, names: [] });
+    } else if (r.type === R.externSheet && biff8 && body.length >= 2) {
+      const n = body[0] | (body[1] << 8);
+      for (let k = 0; k < n && 2 + k * 6 + 2 <= body.length; k++) xti.push(body[2 + k * 6] | (body[3 + k * 6] << 8));
     } else if (r.type === R.externName && body.length >= 2 && books.length) {
+      if (biff8 && body.length >= 7) books[books.length - 1].names.push(xlString(body, 7, body[6]).text);
       // fOle and fOleLink mark an OLE object's name. Excel writes StdDocumentName with fOle beside the items of a DDE
       // link, so a link with any DDE item is a DDE link.
       if ((body[0] | (body[1] << 8)) & 0x18) books[books.length - 1].ole = true;
@@ -67,7 +89,8 @@ export async function excelRules(ctx: RunContext, cfb: CompoundFile, stream: Cfb
     }
   }
   for (const b of books) linkRules(ctx, b, location);
-  for (const s of sheets) await sheetRules(ctx, cfb, stream, s, decrypt, location);
+  const nameOf = (ref: BiffNameRef) => (ref.kind === 'name' ? names[ref.index - 1] : books[xti[ref.ixti] ?? -1]?.names[ref.index - 1]);
+  for (const s of sheets) await sheetRules(ctx, cfb, stream, s, decrypt, location, biff8 ? nameOf : undefined);
   return flags;
 }
 
@@ -112,13 +135,14 @@ export function virtualPath(p: string): string {
 }
 
 /** One sheet's substream, with any chart substreams inside it: Obj records that run macros, and hyperlinks. */
-async function sheetRules(ctx: RunContext, cfb: CompoundFile, stream: CfbEntry, s: Sheet, decrypt: Decrypt, location: string): Promise<void> {
+async function sheetRules(ctx: RunContext, cfb: CompoundFile, stream: CfbEntry, s: Sheet, decrypt: Decrypt, location: string, nameOf?: (ref: BiffNameRef) => string | undefined): Promise<void> {
   const records = new RecordReader(cfb, stream, s.position, ctx.settings.deadline);
   const bof = await records.next();
   if (bof?.type !== R.bof || bof.body.length < 4) return;
   const bofType = bof.body[2] | (bof.body[3] << 8);
   // The sheet's own BOF says what it is, and so does its BoundSheet record. Either one makes a macro sheet.
-  if (s.type === 1 || bofType === 0x0040) ctx.report(C.Macro, D.XlmMacrosheet, location, { sheet: clip(s.name), state: STATES[s.state] });
+  const macroSheet = s.type === 1 || bofType === 0x0040;
+  if (macroSheet) ctx.report(C.Macro, D.XlmMacrosheet, location, { sheet: clip(s.name), state: STATES[s.state] });
   let depth = 1;
   for (let r = await records.next(); r && depth > 0; r = await records.next()) {
     if (r.type === R.bof) depth++;
@@ -128,6 +152,14 @@ async function sheetRules(ctx: RunContext, cfb: CompoundFile, stream: CfbEntry, 
     } else if (r.type === R.hlink) {
       const target = hyperlink(decrypt(r));
       if (target.trim() && !isFragment(target)) ctx.link(target, location, { sheet: clip(s.name), source: 'HLink record' });
+    } else if (nameOf && !macroSheet && FORMULA_AT.has(r.type)) {
+      // A macro sheet's formulas are its macros, which its own finding covers.
+      const b = decrypt(r);
+      const at = FORMULA_AT.get(r.type) ?? 0;
+      if (b.length < at + 2) continue;
+      const cce = b[at] | (b[at + 1] << 8);
+      for (const [fn, kind] of biffCalls(b.subarray(at + 2, at + 2 + cce), nameOf))
+        ctx.report(kind === 'fetch' ? C.External : C.Macro, D.Formula, location, { sheet: clip(s.name), function: clip(fn) });
     }
   }
 }

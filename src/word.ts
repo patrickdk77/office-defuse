@@ -3,8 +3,9 @@ import type { RunContext } from './context';
 import { checkTime, StopError } from './errors';
 import { FieldStack } from './fields';
 import { Reader } from './io';
+import { type StreamDecrypt, unlockDocument } from './offcrypto';
 import { ByteReader, bounded, utf16 } from './oleobj';
-import { OfficeCategory as C, OfficeDetail as D } from './types';
+import { type ByteSource, OfficeCategory as C, OfficeDetail as D } from './types';
 
 /** wIdent of Word 97 and later, and of Word 6.0 and 95 (MS-DOC 2.5.2). */
 const WORD8 = 0xa5ec;
@@ -14,10 +15,18 @@ const FC_STTBF_ASSOC = 32;
 const FC_CLX = 33;
 /** In a Word 6.0 or 95 FIB, the length of the macro table that holds WordBasic macros. Word writes 2 for an empty one. */
 const WORD6_MACROS = 0x11c;
+/** In a Word 6.0 or 95 FIB, fcClx and lcbClx: where the piece table of a file saved fast lies in the WordDocument stream. */
+const WORD6_CLX = 0x160;
 /** Text is read in pieces of at most this many characters. */
 const PIECE = 65536;
 
 const u16 = (b: Uint8Array, at: number) => b[at] | (b[at + 1] << 8);
+
+/** A stream read through its decryption. */
+const decrypted = (src: ByteSource, decrypt: StreamDecrypt): ByteSource => ({
+  size: () => src.size(),
+  read: async (offset, length) => decrypt(offset, await src.read(offset, length)),
+});
 const u32 = (b: Uint8Array, at: number) => (b[at] | (b[at + 1] << 8) | (b[at + 2] << 16) | (b[at + 3] << 24)) >>> 0;
 
 /**
@@ -25,16 +34,25 @@ const u32 = (b: Uint8Array, at: number) => (b[at] | (b[at + 1] << 8) | (b[at + 2
  * attaches. Returns whether it is a template, or undefined for an `optional` stream that holds no FIB.
  */
 export async function wordRules(ctx: RunContext, cfb: CompoundFile, stream: CfbEntry, optional = false): Promise<{ template: boolean } | undefined> {
-  const source = cfb.source(stream);
-  const fib = await source.read(0, 1024);
+  let source = cfb.source(stream);
+  let fib = await source.read(0, 1024);
   const ident = fib.length >= 32 ? u16(fib, 0) : 0;
   if (ident !== WORD8 && ident !== WORD6) {
     if (optional) return undefined;
     throw new StopError(C.Package, D.Unrecognized, 'The WordDocument stream does not start with a Word FIB', { reason: 'a WordDocument stream without a FIB' });
   }
   const flags = u16(fib, 10);
-  // fEncrypted, set for both RC4 encryption and XOR obfuscation.
-  if (flags & 0x0100) throw new StopError(C.Encrypted, D.PasswordRequired, 'The document is encrypted', { stream: stream.name });
+  const tableEntry = cfb.child(cfb.root, flags & 0x0200 ? '1Table' : '0Table');
+  let tableSource = tableEntry?.kind === 'stream' ? cfb.source(tableEntry) : undefined;
+  // fEncrypted, set for RC4, RC4 CryptoAPI and XOR obfuscation alike. Word 97 to 2003 documents are read through the
+  // decryption. A Word 6.0 or 95 document's encryption is another, which this reader does not undo.
+  if (flags & 0x0100) {
+    if (ident === WORD6 || !tableSource) throw new StopError(C.Encrypted, D.PasswordRequired, 'The document is encrypted', { stream: stream.name });
+    const key = await unlockDocument(ctx, fib, tableSource, stream.name);
+    source = decrypted(source, key.word);
+    tableSource = decrypted(tableSource, key.table);
+    fib = await source.read(0, 1024);
+  }
   const location = stream.name;
   const fields = new FieldStack(ctx, location);
   // Word marks a field's start, separator and end with 0x13, 0x14 and 0x15 in the text. Other control characters in
@@ -44,25 +62,40 @@ export async function wordRules(ctx: RunContext, cfb: CompoundFile, stream: CfbE
       if (ch === '\x13') fields.begin();
       else if (ch === '\x14') fields.separate();
       else if (ch === '\x15') fields.end();
-      else if (fields.inCode && (ch >= ' ' || ch === '\t')) fields.text(ch);
+      else if (ch >= ' ' || ch === '\t') {
+        if (fields.inCode) fields.text(ch);
+        else fields.result(ch);
+      }
     }
   };
   const reader = new Reader(source, stream.size, 65536, 8);
   if (ident === WORD6) {
-    // Word 6.0 and 95 keep their text as 8-bit characters from fcMin to fcMac. A file saved fast adds pieces to the
-    // end, and this reads every byte between, as msodde does.
-    const from = u32(fib, 0x18);
-    const to = Math.min(u32(fib, 0x1c), stream.size);
-    for (let at = from; at < to; at += PIECE) {
-      checkTime(ctx.settings.deadline);
-      text(latin(await reader.read(at, Math.min(PIECE, to - at))));
+    // Word 6.0 and 95 keep their text as 8-bit characters. A file saved fast (fComplex) adds pieces to the end, and its
+    // piece table, in the WordDocument stream itself at fcClx (FIB offset 0x160), gives their order. Any other file,
+    // or one whose piece table does not read, is read from fcMin to fcMac, every byte between, as msodde does.
+    const clxAt = u32(fib, WORD6_CLX);
+    const clxSize = u32(fib, WORD6_CLX + 4);
+    const list = flags & 0x0004 && clxSize > 0 && clxAt + clxSize <= stream.size ? pieces(await reader.read(clxAt, clxSize)).filter(p => !p.compressed && p.fc + p.length <= stream.size) : [];
+    if (list.length) {
+      for (const p of list) {
+        for (let cp = 0; cp < p.length; cp += PIECE) {
+          checkTime(ctx.settings.deadline);
+          text(latin(await reader.read(p.fc + cp, Math.min(PIECE, p.length - cp))));
+        }
+      }
+    } else {
+      const from = u32(fib, 0x18);
+      const to = Math.min(u32(fib, 0x1c), stream.size);
+      for (let at = from; at < to; at += PIECE) {
+        checkTime(ctx.settings.deadline);
+        text(latin(await reader.read(at, Math.min(PIECE, to - at))));
+      }
     }
     if (fib.length >= WORD6_MACROS + 4 && u32(fib, WORD6_MACROS) > 2) ctx.report(C.Macro, D.WordBasic, location, { stream: location, bytes: u32(fib, WORD6_MACROS) });
   } else {
     const pairs = fcLcb(fib);
-    const table = cfb.child(cfb.root, flags & 0x0200 ? '1Table' : '0Table');
-    if (table?.kind === 'stream') {
-      const tableSource = cfb.source(table);
+    const table = tableEntry;
+    if (table?.kind === 'stream' && tableSource) {
       const clx = pairs[FC_CLX];
       if (clx && clx.lcb > 0 && clx.fc + clx.lcb <= table.size) {
         for (const p of pieces(await tableSource.read(clx.fc, clx.lcb))) {

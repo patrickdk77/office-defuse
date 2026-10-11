@@ -14,6 +14,7 @@ export enum OfficeCategory {
   Link = 'LINK',
   Embedded = 'EMBEDDED',
   Control = 'CONTROL',
+  Processing = 'PROCESSING',
 }
 
 /** Exact variant of a finding. Some details appear under more than one category. */
@@ -36,6 +37,7 @@ export enum OfficeDetail {
   DataError = 'DATA_ERROR',
   LeadingBytes = 'LEADING_BYTES',
   HiddenData = 'HIDDEN_DATA',
+  HiddenEntry = 'HIDDEN_ENTRY',
   TrailingBytes = 'TRAILING_BYTES',
   BadHeader = 'BAD_HEADER',
   BrokenChain = 'BROKEN_CHAIN',
@@ -59,11 +61,13 @@ export enum OfficeDetail {
   XmlEntityExpansions = 'XML_ENTITY_EXPANSIONS',
   XmlEntitySize = 'XML_ENTITY_SIZE',
   RtfDepth = 'RTF_DEPTH',
+  NestingDepth = 'NESTING_DEPTH',
   Time = 'TIME',
   // PACKAGE
   Unrecognized = 'UNRECOGNIZED',
   AmbiguousFormat = 'AMBIGUOUS_FORMAT',
   Unreadable = 'UNREADABLE',
+  UnreadableBody = 'UNREADABLE_BODY',
   DuplicateEntry = 'DUPLICATE_ENTRY',
   UntypedPart = 'UNTYPED_PART',
   UnreferencedPart = 'UNREFERENCED_PART',
@@ -79,6 +83,7 @@ export enum OfficeDetail {
   Aes192 = 'AES_192',
   Aes256 = 'AES_256',
   UnsupportedAlgorithm = 'UNSUPPORTED_ALGORITHM',
+  XorObfuscation = 'XOR_OBFUSCATION',
   // MACRO
   VbaProject = 'VBA_PROJECT',
   XlmMacrosheet = 'XLM_MACROSHEET',
@@ -95,6 +100,7 @@ export enum OfficeDetail {
   OdfConfiguration = 'ODF_CONFIGURATION',
   // ACTION
   RunProgram = 'RUN_PROGRAM',
+  SubmitForm = 'SUBMIT_FORM',
   OleVerb = 'OLE_VERB',
   ObjectUpdate = 'OBJECT_UPDATE',
   // DDE
@@ -112,6 +118,7 @@ export enum OfficeDetail {
   Workbook = 'WORKBOOK',
   Reload = 'RELOAD',
   Other = 'OTHER',
+  DataConnection = 'DATA_CONNECTION',
   LocalFile = 'LOCAL_FILE',
   // LINK
   Safe = 'SAFE',
@@ -125,6 +132,7 @@ export enum OfficeDetail {
   LookalikeHost = 'LOOKALIKE_HOST',
   EncodedHost = 'ENCODED_HOST',
   Relative = 'RELATIVE',
+  TextMismatch = 'TEXT_MISMATCH',
   // EMBEDDED
   OleObject = 'OLE_OBJECT',
   Package = 'PACKAGE',
@@ -133,8 +141,14 @@ export enum OfficeDetail {
   Plugin = 'PLUGIN',
   Equation = 'EQUATION',
   Attachment = 'ATTACHMENT',
+  PluginPassed = 'PLUGIN_PASSED',
+  PluginScrubbed = 'PLUGIN_SCRUBBED',
+  PluginFailed = 'PLUGIN_FAILED',
+  PluginRemoved = 'PLUGIN_REMOVED',
   // CONTROL
   ActiveX = 'ACTIVEX',
+  // PROCESSING
+  VerificationFailed = 'VERIFICATION_FAILED',
 }
 
 export type OfficeFindingAction = 'reject' | 'strip' | 'info';
@@ -191,6 +205,16 @@ export interface OfficeInspection {
   mimeType: string;
 }
 
+export interface OfficeDisarmResult {
+  status: 'clean' | 'defused' | 'rejected';
+  /** The uploaded file and its score. */
+  before: OfficeInspection;
+  /** The output and its remaining score. Absent when rejected. */
+  after?: OfficeInspection;
+  /** Findings whose content was removed. */
+  removed: DefuseFinding[];
+}
+
 /** Random-access input. A buffer, a local file and an S3 ranged GetObject all fit. */
 export interface ByteSource {
   size(): Promise<number>;
@@ -227,6 +251,11 @@ export interface OfficeLimits {
   xmlEntitySize?: number;
   /** Group nesting in an RTF file, and destinations open at once. Default 256. */
   rtfDepth?: number;
+  /**
+   * The deepest a file may sit in the upload. The upload is at depth 0 and a file inside it at 1, and files of every
+   * format in between count. Not enforced unless set.
+   */
+  nestingDepth?: number;
   /** Milliseconds for the whole run. Not enforced unless set. */
   timeMs?: number;
 }
@@ -293,13 +322,23 @@ export interface OfficeScoreBands {
 
 export interface OfficeOptions {
   /**
-   * Tried first on an encrypted file: an encrypted OOXML package, or an .xls workbook. If it does not open the file,
-   * the password Excel opens it with by default, VelvetSweatshop, is tried. Pass it in code, never on a command line,
-   * where other users can read it.
+   * One password or a list, tried in order on an encrypted file: an encrypted OOXML package, or an .xls workbook.
+   * VelvetSweatshop, the password Excel opens a workbook with by default, comes after them. Pass passwords in code,
+   * never on a command line, where other users can read them.
    */
-  password?: string;
+  password?: string | string[];
   limits?: OfficeLimits;
   actionOverrides?: OfficeActionOverride[];
   scoreWeights?: OfficeScoreWeight[];
   scoreBands?: OfficeScoreBands;
+  /** Plugins that decide about the files inside the file: embedded objects and packages, OLE parts and attachments. */
+  filePlugins?: ContainedFilePlugin[];
+  /** Directory for temporary files. Defaults to os.tmpdir(). */
+  tempDir?: string;
+  /**
+   * Default 8 MiB. disarmOfficeSource keeps its copy of the upload and its output in memory up to this size and in a
+   * temporary file above it. Each file inside that goes to a plugin does the same, and the copies plugins return,
+   * which wait for the output to be written, share this much memory.
+   */
+  memoryThreshold?: number;
 }

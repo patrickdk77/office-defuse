@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as v8 from 'node:v8';
@@ -11,6 +12,11 @@ import { ZipWriter } from '../../src/zip-writer';
 export const root = path.join(__dirname, '..', '..', '..');
 export const fixtures = path.join(root, 'test', 'fixtures');
 export const fixture = (...parts: string[]) => fs.readFileSync(path.join(fixtures, ...parts));
+
+const cli = path.join(root, 'dist', 'cli.js');
+/** Runs the built command-line tool. */
+export const runCli = (args: string[], opts: { input?: Buffer; env?: NodeJS.ProcessEnv; cwd?: string } = {}) =>
+  spawnSync(process.execPath, [cli, ...args], { input: opts.input, env: { ...process.env, ...opts.env }, cwd: opts.cwd, maxBuffer: 64 * 1024 * 1024 });
 
 export const kind = (f: DefuseFinding) => `${f.category}/${f.detail}`;
 export const kinds = (i: { findings: DefuseFinding[] }) => i.findings.map(kind);
