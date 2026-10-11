@@ -1,0 +1,404 @@
+[
+  {
+    "file": "activex-control.xlsx",
+    "issue": "An ActiveX control with the Shockwave Flash class id. Its binary is an inert marker.",
+    "expected": {"status":"strippable","risk":"HIGH","format":"xlsx","kinds":["CONTROL/ACTIVEX"]},
+    "before": {"status":"strippable","risk":"HIGH","format":"xlsx","kinds":["CONTROL/ACTIVEX"]}
+  },
+  {
+    "file": "backslash-names.xlsx",
+    "issue": "Entry names with a backslash for a separator.",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/UNSAFE_NAME"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/UNSAFE_NAME"]}
+  },
+  {
+    "file": "billion-laughs.xlsx",
+    "issue": "Shared strings whose internal subset nests nine levels of ten entity references, the billion laughs. Expanding them passes the limit of 100,000 entity expansions, and LIMIT/XML_ENTITY_EXPANSIONS stops the run.",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"xlsx","kinds":["LIMIT/XML_ENTITY_EXPANSIONS","XML/INTERNAL_SUBSET"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"xlsx","kinds":["XML/DOCTYPE"]}
+  },
+  {
+    "file": "chart-workbook.docx",
+    "issue": "A chart whose data is an embedded workbook, the way Office stores a chart's data.",
+    "expected": {"status":"strippable","risk":"MEDIUM","format":"docx","kinds":["EMBEDDED/PACKAGE"]},
+    "before": {"status":"strippable","risk":"MEDIUM","format":"docx","kinds":["EMBEDDED/PACKAGE"]}
+  },
+  {
+    "file": "comment-past-end.zip",
+    "issue": "An end record whose comment length runs past the end of the file.",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/NOT_ZIP"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/NOT_ZIP"]}
+  },
+  {
+    "file": "configurations2-menubar.odt",
+    "issue": "A menu bar definition under Configurations2/, which can bind menu items to macros.",
+    "expected": {"status":"strippable","risk":"LOW","format":"odt","kinds":["UI/ODF_CONFIGURATION"]},
+    "before": {"status":"strippable","risk":"LOW","format":"odt","kinds":["UI/ODF_CONFIGURATION"]}
+  },
+  {
+    "file": "dde-field.docx",
+    "issue": "A DDEAUTO field that names an inert application.",
+    "expected": {"status":"strippable","risk":"HIGH","format":"docx","kinds":["DDE/FIELD"]},
+    "before": {"status":"strippable","risk":"HIGH","format":"docx","kinds":["DDE/FIELD"]}
+  },
+  {
+    "file": "deep-nesting.docx",
+    "issue": "Tables nested 90 deep, which puts elements 273 deep, past the depth limit of 256.",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"docx","kinds":["LIMIT/XML_DEPTH"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"docx","kinds":["LIMIT/XML_DEPTH"]}
+  },
+  {
+    "file": "descriptor-empty-entry.ods",
+    "issue": "Data descriptors after an empty deflated entry, as LibreOffice writes Configurations2/accelerator/current.xml. The 64-bit reading of the descriptor took the next local header signature for a size and refused the archive as OUT_OF_RANGE.",
+    "expected": {"status":"clean","risk":"NONE","format":"ods","kinds":[]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/OUT_OF_RANGE"]}
+  },
+  {
+    "file": "descriptor-flag-no-descriptor.odt",
+    "issue": "An entry flagged as followed by a data descriptor with none after it.",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/HEADER_MISMATCH"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/HEADER_MISMATCH"]}
+  },
+  {
+    "file": "directory-outside-file.docx",
+    "issue": "A central directory offset beyond the end of the file.",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/OUT_OF_RANGE"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/OUT_OF_RANGE"]}
+  },
+  {
+    "file": "dot-slash-name.docx",
+    "issue": "An entry name that starts with \"./\".",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/UNSAFE_NAME"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/UNSAFE_NAME"]}
+  },
+  {
+    "file": "duplicate-attribute.docx",
+    "issue": "An element with the same attribute twice. Readers may keep either value.",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"docx","kinds":["XML/MALFORMED"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"docx","kinds":["XML/MALFORMED"]}
+  },
+  {
+    "file": "duplicate-name-case.xlsx",
+    "issue": "Two entries whose names differ only in case.",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/DUPLICATE_NAME"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/DUPLICATE_NAME"]}
+  },
+  {
+    "file": "empty-archive.xlsx",
+    "issue": "A ZIP archive with no entries.",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["PACKAGE/UNRECOGNIZED"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["PACKAGE/UNRECOGNIZED"]}
+  },
+  {
+    "file": "empty-configurations2.odt",
+    "issue": "An empty Configurations2/accelerator/current.xml, which LibreOffice writes into the documents it saves. 333 corpus packages hold it and nothing else under Configurations2/. It was reported as menu and key settings.",
+    "expected": {"status":"clean","risk":"NONE","format":"odt","kinds":[]},
+    "before": {"status":"strippable","risk":"LOW","format":"odt","kinds":["UI/ODF_CONFIGURATION"]}
+  },
+  {
+    "file": "empty-main-part.ppam",
+    "issue": "A main part with no content at all.",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"ppam","kinds":["XML/MALFORMED"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"ppam","kinds":["XML/MALFORMED"]}
+  },
+  {
+    "file": "encoded-scheme-ole-link.pptx",
+    "issue": "An OLE object linked to %73cript:%68ttp://..., a percent-encoded script moniker. The link was taken for a relative path and reported as a local file with weight 5.",
+    "expected": {"status":"strippable","risk":"HIGH","format":"pptx","kinds":["EXTERNAL/OBJECT"]},
+    "before": {"status":"strippable","risk":"LOW","format":"pptx","kinds":["EXTERNAL/LOCAL_FILE"]}
+  },
+  {
+    "file": "encrypted-entries.zip",
+    "issue": "A password-protected ZIP archive, as malware collections distribute their samples.",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/ENCRYPTED_ENTRY"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/ENCRYPTED_ENTRY"]}
+  },
+  {
+    "file": "encrypted-package.odt",
+    "issue": "An OpenDocument package encrypted with a password.",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"odt","kinds":["ENCRYPTED/PASSWORD_REQUIRED"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"odt","kinds":["ENCRYPTED/PASSWORD_REQUIRED"]}
+  },
+  {
+    "file": "end-record-in-comment.docx",
+    "issue": "An end record whose comment holds a second central directory and end record, which list another entry.",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/AMBIGUOUS_END"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/AMBIGUOUS_END"]}
+  },
+  {
+    "file": "event-empty-script.odt",
+    "issue": "Document events bound to xlink:href=\"\", among them two that fire as the document opens. LibreOffice runs nothing for an event whose script URL and macro name are both empty. The reader reported each one as MACRO/EVENT or MACRO/EVENT_ON_OPEN.",
+    "expected": {"status":"clean","risk":"NONE","format":"odt","kinds":[]},
+    "before": {"status":"strippable","risk":"CRITICAL","format":"odt","kinds":["MACRO/EVENT","MACRO/EVENT_ON_OPEN"]}
+  },
+  {
+    "file": "external-entity-in-text.docx",
+    "issue": "A document whose internal subset declares an external entity, which the text of a run refers to. The entity is never fetched. The reference is XML/EXTERNAL_ENTITY and the subset XML/INTERNAL_SUBSET, both strip.",
+    "expected": {"status":"strippable","risk":"MEDIUM","format":"docx","kinds":["XML/EXTERNAL_ENTITY","XML/INTERNAL_SUBSET"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"docx","kinds":["XML/DOCTYPE"]}
+  },
+  {
+    "file": "hyperlinks-only.docx",
+    "issue": "Two web links to remote documents and nothing else. A web link is LINK/SAFE, info, as in pdf-defuse.",
+    "expected": {"status":"clean","risk":"NONE","format":"docx","kinds":["LINK/SAFE"]},
+    "before": {"status":"clean","risk":"NONE","format":"docx","kinds":["LINK/SAFE"]}
+  },
+  {
+    "file": "leading-slash-name.odt",
+    "issue": "An entry name that starts with \"/\".",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/UNSAFE_NAME"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/UNSAFE_NAME"]}
+  },
+  {
+    "file": "link-empty-href.odt",
+    "issue": "Empty hrefs on a form button, a text link and an image, and a template named only by its title. An empty reference is the document itself, and LibreOffice skips an empty image or template URL. The reader reported the links as LINK/RELATIVE and the image and template as EXTERNAL/LOCAL_FILE.",
+    "expected": {"status":"clean","risk":"NONE","format":"odt","kinds":[]},
+    "before": {"status":"strippable","risk":"MEDIUM","format":"odt","kinds":["EXTERNAL/LOCAL_FILE","LINK/RELATIVE"]}
+  },
+  {
+    "file": "local-name-differs.docx",
+    "issue": "A local header that contradicts the central directory, here by naming another entry. The fuzzed corpus files contradict it in the name, the sizes or the compression method.",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/HEADER_MISMATCH"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/HEADER_MISMATCH"]}
+  },
+  {
+    "file": "local-template.docx",
+    "issue": "An attached template named by a relative path, Normal.dotm.",
+    "expected": {"status":"strippable","risk":"LOW","format":"docx","kinds":["EXTERNAL/LOCAL_FILE"]},
+    "before": {"status":"strippable","risk":"LOW","format":"docx","kinds":["EXTERNAL/LOCAL_FILE"]}
+  },
+  {
+    "file": "manifest-doctype.odt",
+    "issue": "An OpenOffice.org 2.x-style text document. Its manifest has the document type declaration OpenOffice.org 2.x and StarOffice 8 wrote, a name and a public identifier with no internal subset. That is XML/DOCTYPE, information only, and the external DTD is never loaded.",
+    "expected": {"status":"clean","risk":"NONE","format":"odt","kinds":["XML/DOCTYPE"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["XML/DOCTYPE"]}
+  },
+  {
+    "file": "manifest-prefix-from-dtd.odb",
+    "issue": "An early OpenOffice.org Base database whose manifest uses the manifest prefix without declaring it. Only the external Manifest.dtd declares it, as a #FIXED default of http://openoffice.org/2001/manifest, and office-defuse never loads the DTD, so the manifest is XML/MALFORMED. Its media type, application/vnd.sun.xml.base, is outside the formats this package reads as well.",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["XML/DOCTYPE","XML/MALFORMED"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["XML/DOCTYPE"]}
+  },
+  {
+    "file": "math-object-doctype.odt",
+    "issue": "An embedded formula with the document type declaration OpenOffice.org 2.x and 3.x wrote into formula objects, a name and a public identifier with no internal subset. That is XML/DOCTYPE, information only.",
+    "expected": {"status":"clean","risk":"NONE","format":"odt","kinds":["XML/DOCTYPE"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"odt","kinds":["XML/DOCTYPE"]}
+  },
+  {
+    "file": "metadata-only.zip",
+    "issue": "An OPC package with core properties and no Office main part.",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["PACKAGE/UNRECOGNIZED"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["PACKAGE/UNRECOGNIZED"]}
+  },
+  {
+    "file": "mimetype-not-first.odt",
+    "issue": "An OpenDocument package whose mimetype entry comes after content.xml.",
+    "expected": {"status":"strippable","risk":"LOW","format":"odt","kinds":["PACKAGE/ODF_LAYOUT"]},
+    "before": {"status":"strippable","risk":"LOW","format":"odt","kinds":["PACKAGE/ODF_LAYOUT"]}
+  },
+  {
+    "file": "mimetype-not-media-type.odt",
+    "issue": "A mimetype entry holding image bytes instead of a media type.",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["PACKAGE/ODF_LAYOUT","PACKAGE/UNRECOGNIZED"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["PACKAGE/ODF_LAYOUT","PACKAGE/UNRECOGNIZED"]}
+  },
+  {
+    "file": "mismatched-end-tag.docx",
+    "issue": "An end tag that closes another element than the one open.",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"docx","kinds":["XML/MALFORMED"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"docx","kinds":["XML/MALFORMED"]}
+  },
+  {
+    "file": "odf-basic-on-load.odt",
+    "issue": "A Basic library and a script that runs when the document loads. The module is a comment.",
+    "expected": {"status":"strippable","risk":"CRITICAL","format":"odt","kinds":["MACRO/EVENT_ON_OPEN","MACRO/ODF_BASIC"]},
+    "before": {"status":"strippable","risk":"CRITICAL","format":"odt","kinds":["MACRO/EVENT_ON_OPEN","MACRO/ODF_BASIC"]}
+  },
+  {
+    "file": "odf-inside-folder.odt",
+    "issue": "An OpenDocument package zipped inside a folder, so nothing is at the root.",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["PACKAGE/UNRECOGNIZED"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["PACKAGE/UNRECOGNIZED"]}
+  },
+  {
+    "file": "odf-navigation-events.odp",
+    "issue": "Impress click actions that only move between slides. They run nothing and open nothing.",
+    "expected": {"status":"clean","risk":"NONE","format":"odp","kinds":[]},
+    "before": {"status":"clean","risk":"NONE","format":"odp","kinds":[]}
+  },
+  {
+    "file": "odf-script-url-link.odp",
+    "issue": "A text box link with a javascript: URL.",
+    "expected": {"status":"strippable","risk":"HIGH","format":"odp","kinds":["LINK/SCRIPT_URL"]},
+    "before": {"status":"strippable","risk":"HIGH","format":"odp","kinds":["LINK/SCRIPT_URL"]}
+  },
+  {
+    "file": "ole-object.xlsx",
+    "issue": "An embedded OLE object. The object is an inert marker.",
+    "expected": {"status":"strippable","risk":"MEDIUM","format":"xlsx","kinds":["EMBEDDED/OLE_OBJECT"]},
+    "before": {"status":"strippable","risk":"MEDIUM","format":"xlsx","kinds":["EMBEDDED/OLE_OBJECT"]}
+  },
+  {
+    "file": "one-byte-local-extra.docx",
+    "issue": "A local header whose extra field is one byte, too short for any record.",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/BAD_EXTRA_FIELD"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/BAD_EXTRA_FIELD"]}
+  },
+  {
+    "file": "plain-archive.zip",
+    "issue": "A ZIP archive of text files.",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["PACKAGE/UNRECOGNIZED"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["PACKAGE/UNRECOGNIZED"]}
+  },
+  {
+    "file": "remote-frame.docx",
+    "issue": "A frame in the web settings that loads a page from a web server.",
+    "expected": {"status":"strippable","risk":"MEDIUM","format":"docx","kinds":["EXTERNAL/FRAME"]},
+    "before": {"status":"strippable","risk":"MEDIUM","format":"docx","kinds":["EXTERNAL/FRAME"]}
+  },
+  {
+    "file": "remote-template.docx",
+    "issue": "A template loaded from a web server when the document opens.",
+    "expected": {"status":"strippable","risk":"HIGH","format":"docx","kinds":["EXTERNAL/TEMPLATE"]},
+    "before": {"status":"strippable","risk":"HIGH","format":"docx","kinds":["EXTERNAL/TEMPLATE"]}
+  },
+  {
+    "file": "ribbon-callbacks.xlsm",
+    "issue": "A custom ribbon whose button calls a macro.",
+    "expected": {"status":"strippable","risk":"MEDIUM","format":"xlsm","kinds":["UI/CALLBACK","UI/RIBBON"]},
+    "before": {"status":"strippable","risk":"MEDIUM","format":"xlsm","kinds":["UI/CALLBACK","UI/RIBBON"]}
+  },
+  {
+    "file": "sun-xml-calc.ods",
+    "issue": "An OpenOffice.org 1.x Calc package, application/vnd.sun.xml.calc, with the 2001 manifest namespace. StarOffice and OpenOffice.org 1.x formats are outside the formats this package reads, so after the manifest's document type is reported as information, the media type stops the run.",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["PACKAGE/UNRECOGNIZED","XML/DOCTYPE"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["XML/DOCTYPE"]}
+  },
+  {
+    "file": "text-outside-root.xlsx",
+    "issue": "Text after the root element of the package relationships.",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["XML/MALFORMED"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["XML/MALFORMED"]}
+  },
+  {
+    "file": "theme-package.docx",
+    "issue": "An Office theme package, whose main part type is not a document format this package reads.",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["PACKAGE/UNRECOGNIZED"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["PACKAGE/UNRECOGNIZED"]}
+  },
+  {
+    "file": "trash-parts.dotx",
+    "issue": "Parts under [trash]/ with no content type that nothing refers to, which Office leaves in some files.",
+    "expected": {"status":"strippable","risk":"LOW","format":"dotx","kinds":["PACKAGE/UNREFERENCED_PART","PACKAGE/UNTYPED_PART"]},
+    "before": {"status":"strippable","risk":"LOW","format":"dotx","kinds":["PACKAGE/UNREFERENCED_PART","PACKAGE/UNTYPED_PART"]}
+  },
+  {
+    "file": "truncated.docx",
+    "issue": "An archive cut short, before its central directory.",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/NOT_ZIP"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/NOT_ZIP"]}
+  },
+  {
+    "file": "two-archives.docx",
+    "issue": "Two archives one after the other. Readers that take the first or the last see different documents.",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/DIRECTORY_MISMATCH"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/DIRECTORY_MISMATCH"]}
+  },
+  {
+    "file": "unclosed-root.odt",
+    "issue": "content.xml ends before its root element closes.",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"odt","kinds":["XML/MALFORMED"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"odt","kinds":["XML/MALFORMED"]}
+  },
+  {
+    "file": "undeclared-prefix.odt",
+    "issue": "content.xml uses the office prefix without declaring it.",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"odt","kinds":["XML/MALFORMED"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"odt","kinds":["XML/MALFORMED"]}
+  },
+  {
+    "file": "unicode-path-field.docx",
+    "issue": "An Info-ZIP Unicode path field that names another entry.",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/NAME_ENCODING"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/NAME_ENCODING"]}
+  },
+  {
+    "file": "utf8-flag-mismatch.xlsx",
+    "issue": "A local header whose UTF-8 flag differs from the central directory.",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/HEADER_MISMATCH"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/HEADER_MISMATCH"]}
+  },
+  {
+    "file": "vba-project.docm",
+    "issue": "A VBA project in a .docm, where the macro documents of the corpus carry theirs. The project part is an inert marker.",
+    "expected": {"status":"strippable","risk":"HIGH","format":"docm","kinds":["MACRO/VBA_PROJECT"]},
+    "before": {"status":"strippable","risk":"HIGH","format":"docm","kinds":["MACRO/VBA_PROJECT"]}
+  },
+  {
+    "file": "vba-project.xlsb",
+    "issue": "An .xlsb workbook with a VBA project.",
+    "expected": {"status":"strippable","risk":"HIGH","format":"xlsb","kinds":["MACRO/VBA_PROJECT"]},
+    "before": {"status":"strippable","risk":"HIGH","format":"xlsb","kinds":["MACRO/VBA_PROJECT"]}
+  },
+  {
+    "file": "vba-template.dotm",
+    "issue": "A macro-enabled Word template with a VBA project.",
+    "expected": {"status":"strippable","risk":"HIGH","format":"dotm","kinds":["MACRO/VBA_PROJECT"]},
+    "before": {"status":"strippable","risk":"HIGH","format":"dotm","kinds":["MACRO/VBA_PROJECT"]}
+  },
+  {
+    "file": "vml-conditional-markers.pptx",
+    "issue": "A VML drawing with <![if gte mso 9]> and <![endif]> around an ActiveX preview, as PowerPoint writes it. The strict XML reader refused it as MALFORMED.",
+    "expected": {"status":"strippable","risk":"HIGH","format":"pptx","kinds":["CONTROL/ACTIVEX"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"pptx","kinds":["XML/MALFORMED"]}
+  },
+  {
+    "file": "vml-nul-character.xlsx",
+    "issue": "A VML drawing that holds a NUL character, which neither XML nor the VML dialect allows.",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"xlsx","kinds":["XML/MALFORMED"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"xlsx","kinds":["XML/MALFORMED"]}
+  },
+  {
+    "file": "vml-unclosed-br.xlsx",
+    "issue": "A VML form button whose text has unclosed <br> tags, as Excel 2007 writes it, and an x:FmlaMacro. The strict XML reader refused it as MALFORMED.",
+    "expected": {"status":"strippable","risk":"HIGH","format":"xlsx","kinds":["MACRO/LINK"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"xlsx","kinds":["XML/MALFORMED"]}
+  },
+  {
+    "file": "wrong-crc.docx",
+    "issue": "An entry whose data does not match its CRC.",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"docx","kinds":["CONTAINER/DATA_ERROR"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"docx","kinds":["CONTAINER/DATA_ERROR"]}
+  },
+  {
+    "file": "xlm-macrosheet.xlsm",
+    "issue": "An Excel 4.0 macro sheet. Its one formula is HALT().",
+    "expected": {"status":"strippable","risk":"HIGH","format":"xlsm","kinds":["MACRO/XLM_MACROSHEET"]},
+    "before": {"status":"strippable","risk":"HIGH","format":"xlsm","kinds":["MACRO/XLM_MACROSHEET"]}
+  },
+  {
+    "file": "xlsb-dde-link.xlsb",
+    "issue": "An .xlsb external link part holding a DDE link record, the binary form of an Excel ddeLink. The binary part went unread and the file came out clean.",
+    "expected": {"status":"strippable","risk":"HIGH","format":"xlsb","kinds":["DDE/LINK"]},
+    "before": {"status":"clean","risk":"NONE","format":"xlsb","kinds":[]}
+  },
+  {
+    "file": "xps-document.xps",
+    "issue": "An XPS document, which this version does not read.",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["PACKAGE/UNRECOGNIZED"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["PACKAGE/UNRECOGNIZED"]}
+  },
+  {
+    "file": "zip64-end-disagrees.docx",
+    "issue": "A ZIP64 end record whose directory size and offset disagree with the end record.",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/ZIP64_MISMATCH"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/ZIP64_MISMATCH"]}
+  },
+  {
+    "file": "zip64-streamed.ods",
+    "issue": "Streamed ZIP64 entries whose local ZIP64 sizes are all ones, meaning unknown, with the sizes in 24-byte data descriptors. The reader took the ones for a size and refused the archive as OUT_OF_RANGE.",
+    "expected": {"status":"clean","risk":"NONE","format":"ods","kinds":[]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["CONTAINER/OUT_OF_RANGE"]}
+  }
+]

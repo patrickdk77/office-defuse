@@ -1,0 +1,98 @@
+{
+  "name": "@patrickdk77/office-defuse",
+  "version": "0.1.0",
+  "description": "Inspect Office and OpenDocument files for VBA and Excel 4.0 macros, LibreOffice Basic and scripts, DDE, external templates and links, embedded OLE objects and ActiveX controls, and score the risk. Strict ZIP and XML readers, bounded memory, no runtime dependencies.",
+  "license": "MIT",
+  "author": "patrickdk77",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true});require('fs').rmSync('build-test',{recursive:true,force:true})\"",
+    "build": "tsc -p tsconfig.json && node scripts/write-esm-wrapper.js",
+    "build:test": "tsc -p tsconfig.test.json",
+    "lint": "biome check .",
+    "format": "biome format --write .",
+    "test": "npm run lint && npm run build && npm run build:test && mocha --timeout 120000 \"build-test/test/**/*.test.js\"",
+    "coverage": "npm run build && npm run build:test && c8 --include \"build-test/src/**\" --reporter text mocha --timeout 120000 \"build-test/test/**/*.test.js\"",
+    "prepare": "husky || true",
+    "prepublishOnly": "npm run clean && npm test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/patrickdk77/office-defuse.git"
+  },
+  "bugs": {
+    "url": "https://github.com/patrickdk77/office-defuse/issues"
+  },
+  "homepage": "https://github.com/patrickdk77/office-defuse",
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "office",
+    "docx",
+    "docm",
+    "xlsx",
+    "xlsm",
+    "pptx",
+    "pptm",
+    "vsdx",
+    "odt",
+    "ods",
+    "odp",
+    "ooxml",
+    "openxml",
+    "opendocument",
+    "libreoffice",
+    "macro",
+    "macros",
+    "vba",
+    "xlm",
+    "dde",
+    "ddeauto",
+    "activex",
+    "ole",
+    "zip",
+    "security",
+    "inspect",
+    "inspection",
+    "scanner",
+    "scan",
+    "detect",
+    "defuse",
+    "cdr"
+  ],
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.15",
+    "@types/chai": "^5.2.3",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^22.20.5",
+    "c8": "^12.0.0",
+    "chai": "^6.3.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.6.0",
+    "mocha": "^12.0.3",
+    "typescript": "^7.0.2"
+  },
+  "lint-staged": {
+    "*.{ts,js,mjs,cjs,json,jsonc}": "biome check --write --no-errors-on-unmatched --files-ignore-unknown=true"
+  }
+}
