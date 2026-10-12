@@ -260,6 +260,31 @@ export interface OfficeLimits {
   timeMs?: number;
 }
 
+export interface FormatDetection {
+  /** The format's MIME type, such as application/vnd.openxmlformats-officedocument.wordprocessingml.document. */
+  mimeType: string;
+  /** The format's usual extension, lowercase and without the dot. */
+  extension: string;
+  /** Where the format starts in the file: 0, or the offset of its data when other data comes first. */
+  offset: number;
+  /** Set when the match rests on more than the content, and says what it rests on. */
+  heuristic?: string;
+}
+
+/** What a detect function may know of a file besides its content. */
+export interface DetectOptions {
+  /** The file's name, as the upload or the container that holds it gives it. */
+  name?: string;
+  /** The MIME type the upload or the container declares. */
+  declaredType?: string;
+  /** The Date.now() value detection must finish by, as `PluginContext.deadline`. */
+  deadline?: number;
+  /** Folder for temporary files. Defaults to `os.tmpdir()`. */
+  tempDir?: string;
+  /** Bytes held in memory before a temporary file takes over. */
+  memoryThreshold?: number;
+}
+
 /** What a contained file plugin learns of the run, with nothing format-specific, so any package of the family can make one. */
 export interface PluginContext {
   /** The depth of the file itself: 0 for the upload, 1 for a file inside it, and so on, whatever the formats. */

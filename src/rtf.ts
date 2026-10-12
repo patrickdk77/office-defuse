@@ -3,6 +3,7 @@ import { type ContainedDecision, decideContained, presence } from './contained';
 import { clip, type Reported, type RunContext } from './context';
 import { checkTime, StopError } from './errors';
 import { FieldStack } from './fields';
+import { RTF_FORMAT } from './formats';
 import { bufferSource, chunksOf, readAll } from './io';
 import { isFragment } from './links';
 import { compoundRules, describeObject, isEquationClass, linkedObject, nestedNotes, packageData } from './objects';
@@ -166,7 +167,7 @@ const isDigit = (c: number) => c >= 0x30 && c <= 0x39;
  * text after the document's last brace is still read, as rtfobj reads it, and reported as trailing data.
  */
 export async function inspectRtf(ctx: RunContext, source: ByteSource, size: number): Promise<void> {
-  ctx.format = { format: 'rtf', mimeType: 'application/rtf' };
+  ctx.format = RTF_FORMAT;
   const cuts: RtfCut[] = [];
   ctx.run.output = { kind: 'rtf', size, cuts };
   const reader = new RtfReader(ctx, size, cuts);

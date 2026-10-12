@@ -41,12 +41,29 @@ const FORMULA_AT = new Map([
 ]);
 
 /**
+ * Whether a workbook stream holds a template or an add-in: its globals substream, from the BOF that starts the stream
+ * to its EOF, holds a Template or an AddIn record. Record headers are never encrypted, so an encrypted workbook tells
+ * this without its password. A stream that does not start with a BOF record is neither.
+ */
+export async function workbookKind(cfb: CompoundFile, stream: CfbEntry, deadline?: number): Promise<{ template: boolean; addIn: boolean }> {
+  const kind = { template: false, addIn: false };
+  const records = new RecordReader(cfb, stream, 0, deadline);
+  const first = await records.next();
+  if (first?.type !== R.bof || first.body.length < 4) return kind;
+  for (let r = await records.next(); r && r.type !== R.eof; r = await records.next()) {
+    if (r.type === R.template) kind.template = true;
+    else if (r.type === R.addIn) kind.addIn = true;
+  }
+  return kind;
+}
+
+/**
  * Inspects an Excel 5.0 to 2003 workbook stream. Excel reads the globals substream from the start of the stream,
  * then each sheet from where its BoundSheet record says the sheet starts. The globals give the macro sheets, the
  * names Excel runs as macros, and the DDE, OLE and workbook links. The sheets give shapes that run macros and
  * hyperlinks. An encrypted workbook goes through `unlock`.
  */
-export async function excelRules(ctx: RunContext, cfb: CompoundFile, stream: CfbEntry, unlock: Unlock): Promise<{ template: boolean; addIn: boolean }> {
+export async function excelRules(ctx: RunContext, cfb: CompoundFile, stream: CfbEntry, unlock: Unlock): Promise<void> {
   const location = stream.name;
   const records = new RecordReader(cfb, stream, 0, ctx.settings.deadline);
   const first = await records.next();
@@ -59,7 +76,6 @@ export async function excelRules(ctx: RunContext, cfb: CompoundFile, stream: Cfb
   const names: string[] = [];
   /** The SupBook each XTI of the ExternSheet record names. */
   const xti: number[] = [];
-  const flags = { template: false, addIn: false };
   for (let r = await records.next(); r && r.type !== R.eof; r = await records.next()) {
     if (r.type === R.filePass) {
       decrypt = await unlock(ctx, r, location);
@@ -67,8 +83,6 @@ export async function excelRules(ctx: RunContext, cfb: CompoundFile, stream: Cfb
     }
     const body = decrypt(r);
     if (r.type === R.boundSheet) sheets.push(parseBoundSheet(body, biff8));
-    else if (r.type === R.template) flags.template = true;
-    else if (r.type === R.addIn) flags.addIn = true;
     else if (r.type === R.lbl) {
       const name = parseLbl(body, biff8);
       names.push(name.name);
@@ -91,7 +105,6 @@ export async function excelRules(ctx: RunContext, cfb: CompoundFile, stream: Cfb
   for (const b of books) linkRules(ctx, b, location);
   const nameOf = (ref: BiffNameRef) => (ref.kind === 'name' ? names[ref.index - 1] : books[xti[ref.ixti] ?? -1]?.names[ref.index - 1]);
   for (const s of sheets) await sheetRules(ctx, cfb, stream, s, decrypt, location, biff8 ? nameOf : undefined);
-  return flags;
 }
 
 /** A SupBook record, read as MS-XLS 2.4.271 and oletools tell its kinds apart. */

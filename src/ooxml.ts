@@ -3,7 +3,7 @@ import { decideContained, presence } from './contained';
 import { clip, type Reported, type ZipContext } from './context';
 import { StopError } from './errors';
 import { FieldStack } from './fields';
-import { OOXML_FORMATS, XPS_FORMATS, XPS_SEQUENCE } from './formats';
+import { type Format, OOXML_FORMATS, XPS_FORMATS, XPS_SEQUENCE } from './formats';
 import { FunctionCalls, Quotes } from './formulas';
 import { isAbsoluteTarget, isFragment } from './links';
 import { attributeKey } from './plan';
@@ -518,23 +518,19 @@ class PartRules implements XmlHandler {
   }
 }
 
-/**
- * Inspects an OOXML package. The package relationships come first, since they name the main part and so the format.
- * Then each part is read in archive order, followed by its relationships, which are reported as they are read and
- * leave behind only which parts they reach and how.
- */
-export async function inspectOoxml(ctx: ZipContext, contentTypes: ZipEntry): Promise<void> {
+/** An OOXML package's parts, typed by its [Content_Types].xml, and its relationships parts by the key of the part each belongs to. */
+export interface OoxmlParts {
+  parts: Map<string, Part>;
+  relsOf: Map<string, ZipEntry>;
+}
+
+/** Reads [Content_Types].xml and types each part by it. Directory entries are neither parts nor relationships parts. */
+export async function readParts(ctx: ZipContext, contentTypes: ZipEntry): Promise<OoxmlParts> {
   const { defaults, overrides } = await readContentTypes(ctx, contentTypes);
   const parts = new Map<string, Part>();
   const relsOf = new Map<string, ZipEntry>();
-  const plan = ctx.plan;
   for (const entry of ctx.zip.entries) {
-    if (entry === contentTypes) continue;
-    // OPC has no folders. A directory entry is still inflated once, so its bytes are checked like any other.
-    if (entry.directory) {
-      await ctx.drain(entry);
-      continue;
-    }
+    if (entry === contentTypes || entry.directory) continue;
     const source = relsSource(entry.name);
     if (source !== undefined) {
       relsOf.set(source, entry);
@@ -544,9 +540,63 @@ export async function inspectOoxml(ctx: ZipContext, contentTypes: ZipEntry): Pro
     const ext = /\.([^./]*)$/.exec(entry.name)?.[1]?.toLowerCase();
     parts.set(key, { entry, contentType: overrides.get(key) ?? (ext === undefined ? undefined : defaults.get(ext)), reachedAs: 0, claimed: false, targets: new Set(), ole: false });
   }
+  return { parts, relsOf };
+}
 
-  const roots = new Set<Part>();
+/** The format the package relationships name, and the relationship types they use. */
+export interface OoxmlMain {
+  format: Format;
+  /** The package uses the relationship types of Strict OOXML. */
+  strict: boolean;
+  /** The package is XPS or OpenXPS. */
+  xps: boolean;
+}
+
+/**
+ * Reads the package relationships and names the format by the one main part they name: by its content type, or for
+ * XPS by the relationship type too, since XPS and OpenXPS share their content types. `each` sees every package
+ * relationship as it is read. Throws when no main part, or more than one, is named, or its format is unknown.
+ */
+export async function readMain(ctx: ZipContext, { parts, relsOf }: OoxmlParts, each?: (rels: ZipEntry, r: Relationship) => void): Promise<OoxmlMain> {
+  const packageRels = relsOf.get('');
   const mains: Array<Part | undefined> = [];
+  let strict = false;
+  let mainType = '';
+  if (packageRels) {
+    await readRelationships(ctx, packageRels, r => {
+      if (REL.main.has(r.type)) {
+        mains.push(r.external ? undefined : parts.get(resolveTarget(packageRels.name, r.target)));
+        strict = r.type.startsWith(S);
+        mainType = r.type;
+      }
+      each?.(packageRels, r);
+    });
+  }
+  if (mains.length > 1) throw new StopError(C.Package, D.AmbiguousFormat, 'The package names more than one main part', { reason: 'more than one main part' });
+  const main = mains[0];
+  if (!main) throw new StopError(C.Package, D.Unrecognized, 'The package has no main part', { reason: 'no main document part' });
+  const xps = mainType === XPS_MAIN.xps || mainType === XPS_MAIN.oxps;
+  const format = xps ? (main.contentType === XPS_SEQUENCE ? XPS_FORMATS[mainType === XPS_MAIN.oxps ? 'oxps' : 'xps'] : undefined) : OOXML_FORMATS.get(main.contentType ?? '');
+  if (!format) throw new StopError(C.Package, D.Unrecognized, 'The main part has an unknown content type', { contentType: clip(main.contentType ?? '') });
+  return { format, strict, xps };
+}
+
+/** Names an OOXML package's format as its inspection does, reading only [Content_Types].xml and the package relationships. */
+export async function nameOoxml(ctx: ZipContext, contentTypes: ZipEntry): Promise<Format> {
+  return (await readMain(ctx, await readParts(ctx, contentTypes))).format;
+}
+
+/**
+ * Inspects an OOXML package. The package relationships come first, since they name the main part and so the format.
+ * Then each part is read in archive order, followed by its relationships, which are reported as they are read and
+ * leave behind only which parts they reach and how. The run names `outer` as the format when given, as for a Flat
+ * OPC package unpacked into a ZIP archive, and the package's own format is returned.
+ */
+export async function inspectOoxml(ctx: ZipContext, contentTypes: ZipEntry, outer?: Format): Promise<Format> {
+  const typed = await readParts(ctx, contentTypes);
+  const { parts, relsOf } = typed;
+  const plan = ctx.plan;
+  const roots = new Set<Part>();
   /** The labels each part gives its hyperlinks, by part key and relationship Id. */
   const labelsOf = new Map<string, Map<string, string[]>>();
   const relate = (rels: ZipEntry, from: Part | undefined, r: Relationship) => {
@@ -573,28 +623,11 @@ export async function inspectOoxml(ctx: ZipContext, contentTypes: ZipEntry): Pro
     if (reported?.action === 'strip') plan.dropRelationship(rels.name, r.id);
   };
 
-  const packageRels = relsOf.get('');
-  let strict = false;
-  let mainType = '';
-  if (packageRels) {
-    await readRelationships(ctx, packageRels, r => {
-      if (REL.main.has(r.type)) {
-        mains.push(r.external ? undefined : parts.get(resolveTarget(packageRels.name, r.target)));
-        strict = r.type.startsWith(S);
-        mainType = r.type;
-      }
-      relate(packageRels, undefined, r);
-    });
-  }
-  if (mains.length > 1) throw new StopError(C.Package, D.AmbiguousFormat, 'The package names more than one main part', { reason: 'more than one main part' });
-  const main = mains[0];
-  if (!main) throw new StopError(C.Package, D.Unrecognized, 'The package has no main part', { reason: 'no main document part' });
-  const xps = mainType === XPS_MAIN.xps || mainType === XPS_MAIN.oxps;
-  // XPS and OpenXPS share their content types, so the relationship type tells them apart.
-  const format = xps ? (main.contentType === XPS_SEQUENCE ? XPS_FORMATS[mainType === XPS_MAIN.oxps ? 'oxps' : 'xps'] : undefined) : OOXML_FORMATS.get(main.contentType ?? '');
-  if (!format) throw new StopError(C.Package, D.Unrecognized, 'The main part has an unknown content type', { contentType: clip(main.contentType ?? '') });
-  ctx.format = format;
+  const { format, strict, xps } = await readMain(ctx, typed, (rels, r) => relate(rels, undefined, r));
+  ctx.format = outer ?? format;
 
+  // OPC has no folders. A directory entry is still inflated once, so its bytes are checked like any other.
+  for (const entry of ctx.zip.entries) if (entry.directory) await ctx.drain(entry);
   for (const [key, p] of parts) {
     const ct = p.contentType;
     if (ct === undefined) {
@@ -624,6 +657,7 @@ export async function inspectOoxml(ctx: ZipContext, contentTypes: ZipEntry): Pro
   for (const p of parts.values()) await partRules(ctx, p);
   unreferenced(ctx, parts, relsOf, roots);
   plan.graph = { contentTypes, parts, relsOf, roots, strict, xps };
+  return format;
 }
 
 /**

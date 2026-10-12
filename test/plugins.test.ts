@@ -173,7 +173,7 @@ describe('file plugins', () => {
 });
 
 describe('officePlugin', () => {
-  it('accepts compound files, RTF and ZIP archives with an Office marker, by content alone', async () => {
+  it('accepts what detectOffice names, by content alone', async () => {
     const p = officePlugin();
     const { bufferSource } = await import('../src/io');
     const { sniffType } = await import('../src/sniff');
@@ -210,12 +210,15 @@ describe('officePlugin', () => {
   });
 
   it('runs with the options of the run that found the file, or its own', async () => {
-    const encrypted = fixture('ole', 'password.docx');
-    const input = await withPackage(encrypted);
-    const inherited = await inspectOffice(input, { password: ['nope', 'inert-password'], filePlugins: [officePlugin()] });
-    expect(kinds(inherited)).to.include('ENCRYPTED/USER_PASSWORD');
-    const own = await inspectOffice(input, { password: 'inert-password', filePlugins: [officePlugin({})] });
-    expect(kinds(own)).to.include('ENCRYPTED/PASSWORD_REQUIRED');
+    // An encrypted OOXML package, which detectOffice claims as a compound file until a password opens it, and a
+    // workbook whose records name it before its password opens it.
+    for (const encrypted of [fixture('ole', 'password.docx'), fixture('ole', 'rc4-password.xls')]) {
+      const input = await withPackage(encrypted);
+      const inherited = await inspectOffice(input, { password: ['nope', 'inert-password'], filePlugins: [officePlugin()] });
+      expect(kinds(inherited)).to.include('ENCRYPTED/USER_PASSWORD');
+      const own = await inspectOffice(input, { password: 'inert-password', filePlugins: [officePlugin({})] });
+      expect(kinds(own)).to.include('ENCRYPTED/PASSWORD_REQUIRED');
+    }
   });
 
   it('stops the whole upload at the nesting limit, counted from the upload', async () => {

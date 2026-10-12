@@ -1,7 +1,7 @@
 import { decideContained, presence } from './contained';
 import { clip, type PlanContext, type Reported, type ZipContext } from './context';
 import { StopError } from './errors';
-import { ODF_FORMATS } from './formats';
+import { type Format, ODF_FORMATS } from './formats';
 import { callsDde, formulaCalls } from './formulas';
 import { isFragment, isInsidePackage } from './links';
 import { attributeKey, type ElementEdit } from './plan';
@@ -219,7 +219,7 @@ export class EntryRules implements XmlHandler {
   }
 }
 
-interface Manifest {
+export interface Manifest {
   paths: Set<string>;
   root?: string;
   encrypted: boolean;
@@ -263,12 +263,26 @@ export function folderOf(name: string): { prefix: string; detail: D; category: C
 /** The most of the mimetype entry that is kept. The longest media type in the table is 56 characters. */
 const MAX_MIMETYPE = 256;
 
-/** Inspects an OpenDocument package. */
-export async function inspectOdf(ctx: ZipContext): Promise<void> {
+/** What names an OpenDocument package: the media type its format comes from, and the entries that give it. */
+export interface OdfNaming {
+  format: Format;
+  /** The media type the format was named by. */
+  mediaType: string;
+  mimetype?: ZipEntry;
+  manifestEntry?: ZipEntry;
+  manifest?: Manifest;
+}
+
+/**
+ * Names an OpenDocument package's format by the media type in its mimetype entry or, without one, its manifest's root
+ * entry. Throws when the two name different formats, or the media type is not one this package reads. `layout` hears,
+ * with the entry it concerns, of each way the mimetype entry and the manifest leave the layout OpenDocument asks for.
+ */
+export async function nameOdf(ctx: ZipContext, layout: (location: string, reason: string) => void = () => undefined): Promise<OdfNaming> {
   const zip = ctx.zip;
   const mimetype = zip.entries.find(e => e.name === 'mimetype');
   const manifestEntry = zip.get('META-INF/manifest.xml');
-  const layout = (reason: string) => ctx.report(C.Package, D.OdfLayout, mimetype?.name ?? 'META-INF/manifest.xml', { reason });
+  const note = (reason: string) => layout(mimetype?.name ?? 'META-INF/manifest.xml', reason);
   let declared: string | undefined;
   if (mimetype) {
     let head = Buffer.alloc(0);
@@ -278,21 +292,28 @@ export async function inspectOdf(ctx: ZipContext): Promise<void> {
     // A longer entry holds no media type this package reads, whatever its start says.
     declared = head.toString('latin1') + (mimetype.size > MAX_MIMETYPE ? '...' : '');
     const first = zip.entries.reduce((a, b) => (b.localOffset < a.localOffset ? b : a));
-    if (first !== mimetype) layout('mimetype is not the first entry');
-    if (mimetype.method !== 0) layout('mimetype is compressed');
-    if (mimetype.localExtra) layout('mimetype has an extra field');
-    if (declared !== declared.trim()) layout('mimetype has white space around the media type');
+    if (first !== mimetype) note('mimetype is not the first entry');
+    if (mimetype.method !== 0) note('mimetype is compressed');
+    if (mimetype.localExtra) note('mimetype has an extra field');
+    if (declared !== declared.trim()) note('mimetype has white space around the media type');
     declared = declared.trim();
-  } else layout('there is no mimetype entry');
+  } else note('there is no mimetype entry');
   const manifest = manifestEntry ? await readManifest(ctx, manifestEntry) : undefined;
-  if (!manifest) layout('there is no manifest');
+  if (!manifest) note('there is no manifest');
   const root = manifest?.root;
   if (declared !== undefined && root !== undefined && declared !== root && ODF_FORMATS.has(declared) && ODF_FORMATS.has(root)) {
     throw new StopError(C.Package, D.AmbiguousFormat, 'The mimetype entry and the manifest name different formats', { mimetype: clip(declared), manifest: clip(root) });
   }
-  const type = declared ?? root ?? '';
-  const format = ODF_FORMATS.get(type);
-  if (!format) throw new StopError(C.Package, D.Unrecognized, 'The OpenDocument media type is not one this package reads', { mediaType: clip(type) });
+  const mediaType = declared ?? root ?? '';
+  const format = ODF_FORMATS.get(mediaType);
+  if (!format) throw new StopError(C.Package, D.Unrecognized, 'The OpenDocument media type is not one this package reads', { mediaType: clip(mediaType) });
+  return { format, mediaType, mimetype, manifestEntry, manifest };
+}
+
+/** Inspects an OpenDocument package. */
+export async function inspectOdf(ctx: ZipContext): Promise<void> {
+  const zip = ctx.zip;
+  const { format, mediaType: type, mimetype, manifestEntry, manifest } = await nameOdf(ctx, (location, reason) => ctx.report(C.Package, D.OdfLayout, location, { reason }));
   ctx.format = format;
   if (manifest?.encrypted) throw new StopError(C.Encrypted, D.PasswordRequired, 'The manifest lists encrypted entries');
 

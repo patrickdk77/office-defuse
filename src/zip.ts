@@ -236,6 +236,8 @@ export class ZipArchive {
     readonly entries: ZipEntry[],
     readonly notes: ZipNote[],
     private readonly deadline: number | undefined,
+    /** Where the archive's data starts: the first local header, or the central directory of an archive without entries. */
+    readonly start: number,
   ) {
     for (const e of entries) this.byKey.set(nameKey(e.name), e);
   }
@@ -396,7 +398,7 @@ export class ZipArchive {
       const at = await findLocalHeader(reader, from, to, deadline);
       if (at !== undefined) notes.push({ detail: D.HiddenEntry, bytes: to - from, offset: at });
     }
-    return new ZipArchive(reader, entries, notes, deadline);
+    return new ZipArchive(reader, entries, notes, deadline, sorted.length ? sorted[0].localOffset : dirOffset);
   }
 
   /** Checks a local header and any data descriptor against the central directory, and fills in where the entry's data and the entry end. */

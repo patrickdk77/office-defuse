@@ -91,7 +91,7 @@ A ZIP with both markers is rejected as PACKAGE/AMBIGUOUS_FORMAT, since Office co
 
 A .xlsb gets the package checks. Its sheets are binary records, and the formulas in them go unread. Its external link parts are binary too, and office-defuse reads their link records for DDE links. A .odb gets every ODF check, and the database under `database/` goes unread.
 
-A file that starts with the compound file signature is a compound file, MS-CFB. The streams and storages at its root name the format: `WordDocument` for Word, `Workbook` or `Book` for Excel, `PowerPoint Document`, `VisioDocument`, `__properties_version1.0` for an Outlook message, a `Quill` storage or Publisher's class id beside a `Contents` stream for Publisher, and a `Props` stream beside a storage named by a number for Project. Word's FIB says whether a document is a template, and Excel's records whether a workbook is a template or an add-in. An Outlook template has a class id of its own. A PowerPoint 97 to 2003 template or show reports its format as .ppt, and a Visio stencil or template as .vsd.
+A file that starts with the compound file signature is a compound file, MS-CFB. The streams and storages at its root name the format: `WordDocument` for Word, `Workbook` or `Book` for Excel, `PowerPoint Document`, `VisioDocument`, `__properties_version1.0` for an Outlook message, a `Quill` storage or Publisher's class id beside a `Contents` stream for Publisher, and a `Props` stream beside a storage named by a number for Project. Word's FIB says whether a document is a template, and Excel's records whether a workbook is a template or an add-in. Neither needs the password of an encrypted file. An Outlook template has a class id of its own. A PowerPoint 97 to 2003 template or show reports its format as .ppt, and a Visio stencil or template as .vsd.
 
 A compound file with two of these is PACKAGE/AMBIGUOUS_FORMAT. One with none is PACKAGE/UNRECOGNIZED, and so is a `WordDocument` stream that holds no Word 6.0 to 2003 FIB. A PowerPoint 4.0 file, a bare OLE object and a `vbaProject.bin` on its own all land there.
 
@@ -100,6 +100,19 @@ An encrypted .docx, .xlsx or .pptx is a compound file holding `EncryptionInfo` a
 A file that starts as XML, after any byte order mark and white space, is a flat file. A root `office:document` makes it flat OpenDocument, whose `office:mimetype` gives the format. A root `pkg:package` makes it Flat OPC, the one-file form Word, Excel and PowerPoint save as XML, and its format is `xml` whatever its main part is. Any other root is PACKAGE/UNRECOGNIZED, and so is a flat OpenDocument media type outside the table. A file that is XML and a ZIP archive too is PACKAGE/AMBIGUOUS_FORMAT.
 
 A file that starts with `{\rt` is RTF, as Word takes it. A compound file or RTF file in which the ZIP reader also finds an archive is PACKAGE/AMBIGUOUS_FORMAT. A file with the compound file signature whose compound file does not read, but whose ZIP archive does, is that ZIP archive with LEADING_BYTES.
+
+## Detection
+
+`detectOffice(bytes, options)` and `detectOfficeSource(source, options)` tell a router whether office-defuse reads a file. They return `{ mimeType, extension, offset }`, or undefined. `extension` and `mimeType` are the `format` and `mimeType` an inspection reports. The inspection and detection name a file with the same functions. Detection opens the container and reads only what names the format, without the rules, the plugins or the rewrite:
+
+- the streams at a compound file's root, and for Word and Excel the FIB or the workbook's globals, which say whether it is a template or an add-in
+- a package's `[Content_Types].xml` and package relationships, or its `mimetype` entry and manifest
+- a flat file's root element, and for Flat OPC each part's name and content type and the package relationships
+- the first bytes of RTF
+
+Detection does not claim a file whose format office-defuse cannot name. That covers a ZIP archive with no Office marker and a package of another kind, such as a NuGet package or a StarOffice file. It covers a compound file with no Office document at its root, such as an installer or a bare OLE object, and a file that is a ZIP archive and a compound file at once. An encrypted OOXML package names its format only once it is decrypted, and detection has no password. When VelvetSweatshop opens the package, detection names the format inside. Otherwise it claims the package as a compound file, application/x-ole-storage with an empty extension, since the file is office-defuse's whatever the password turns out to be. The inspection then decrypts it with the run's password, or rejects it as encrypted. Detection claims a file it can name even when the file is damaged further on, and the inspection then rejects it.
+
+`offset` is where the ZIP data starts in an archive with other data in front, as the ZIP reader finds it, and 0 for anything else. The name and declared type play no part, so `heuristic` is never set. `detectOfficeSource` leaves the source open and throws with the `DEFUSE_LIMIT` code once `options.deadline` passes. An I/O error from the source comes back unchanged. Naming a Flat OPC package packs its parts into a ZIP archive, which spills into `options.tempDir` past `options.memoryThreshold`. `officePlugin` accepts exactly what detection claims.
 
 ## What it reports
 
@@ -241,7 +254,7 @@ The findings a plugin returns go into the report with their `location` after the
 
 The plugin context has `depth`, the file's depth in the upload, and `deadline`, which every file of the upload shares. An error with `code: 'DEFUSE_LIMIT'` or `code: 'DEFUSE_IO'` from a plugin stops the whole upload. At depth 0, a limit becomes LIMIT/TIME or LIMIT/NESTING_DEPTH, and an I/O error is thrown as its cause.
 
-`officePlugin(options)` defuses Office and OpenDocument files inside other files. It accepts a file by its content alone: a compound file, RTF, a ZIP archive with `[Content_Types].xml`, a `mimetype` entry or `META-INF/manifest.xml`, or XML whose root is a flat OpenDocument document or a Flat OPC package. It runs disarm at the context's depth with the context's deadline. Without `options` it takes the options of the office-defuse run that found the file, or none when another package found it. A clean file comes back `passed`, a defused one `scrubbed`, both with the rewritten bytes, and a rejected one `removed`. The findings it returns carry their `weight`.
+`officePlugin(options)` defuses Office and OpenDocument files inside other files. It accepts the files [`detectOffice`](#detection) claims, by their content alone, an encrypted OOXML package included, which it decrypts with the run's password. It runs disarm at the context's depth with the context's deadline. Without `options` it takes the options of the office-defuse run that found the file, or none when another package found it. A clean file comes back `passed`, a defused one `scrubbed`, both with the rewritten bytes, and a rejected one `removed`. The findings it returns carry their `weight`.
 
 ```js
 const { disarmOffice, officePlugin } = require('@patrickdk77/office-defuse');

@@ -60,3 +60,6 @@ export const ODF_FORMATS = new Map<string, Format>(
     ] as const
   ).map(([kind, ext]) => [`application/vnd.oasis.opendocument.${kind}`, f(ext, `application/vnd.oasis.opendocument.${kind}`)]),
 );
+
+/** RTF, which Word reads in any file that starts with {\rt. */
+export const RTF_FORMAT = f('rtf', 'application/rtf');

@@ -3,9 +3,7 @@ import { expect } from 'chai';
 import { type ContainedFile, type ContainedFilePlugin, disarmOffice, inspectOffice, officePlugin } from '../src';
 import { crc32 } from '../src/crc32';
 import { bufferSource } from '../src/io';
-import { kinds, must, ODF_NS, OLE, of, T, W } from './helpers/util';
-
-const PKG = 'http://schemas.microsoft.com/office/2006/xmlPackage';
+import { flatOdf, flatOpc, flatWord, kinds, must, OLE, of, partRels, RELS, T, W } from './helpers/util';
 
 /** A 1 x 1 gray PNG. */
 function png(): Buffer {
@@ -21,51 +19,8 @@ function png(): Buffer {
   return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(Buffer.from([0, 0x80]))), chunk('IEND', Buffer.alloc(0))]);
 }
 
-/** A flat OpenDocument file of `kind` whose root holds `inner`, after an XML declaration and `prolog`. */
-const flatOdf = (inner: string, kind = 'text', prolog = '') =>
-  Buffer.from(
-    `<?xml version="1.0" encoding="UTF-8"?>\n${prolog}<office:document ${ODF_NS} office:version="1.3" office:mimetype="application/vnd.oasis.opendocument.${kind}">${inner}</office:document>`,
-    'utf8',
-  );
 const textBody = (inner: string) => `<office:body><office:text>${inner}</office:text></office:body>`;
 const picture = (data: Buffer) => `<draw:frame draw:name="p"><draw:image draw:mime-type="image/png"><office:binary-data>${data.toString('base64')}</office:binary-data></draw:image></draw:frame>`;
-
-interface FlatPart {
-  name: string;
-  type: string;
-  xml?: string;
-  binary?: Uint8Array;
-}
-
-/** A Flat OPC package of `parts`, with Word's mso-application processing instruction. */
-const flatOpc = (parts: FlatPart[], rootAttributes = '') =>
-  Buffer.from(
-    `<?xml version="1.0" standalone="yes"?>\n<?mso-application progid="Word.Document"?>\n<pkg:package xmlns:pkg="${PKG}"${rootAttributes}>${parts
-      .map(
-        p =>
-          `<pkg:part pkg:name="${p.name}" pkg:contentType="${p.type}">${p.xml !== undefined ? `<pkg:xmlData>${p.xml}</pkg:xmlData>` : `<pkg:binaryData>${Buffer.from(p.binary ?? []).toString('base64')}</pkg:binaryData>`}</pkg:part>`,
-      )
-      .join('')}</pkg:package>`,
-    'utf8',
-  );
-
-const RELS = 'application/vnd.openxmlformats-package.relationships+xml';
-const rels = (...r: Array<[string, string, string, boolean?]>) =>
-  `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${r.map(([id, type, target, external]) => `<Relationship Id="${id}" Type="${type}" Target="${target}"${external ? ' TargetMode="External"' : ''}/>`).join('')}</Relationships>`;
-
-/** A flat Word document whose body is `body`, with `docRels` from the document and further parts. */
-function flatWord(body: string, docRels: Array<[string, string, string, boolean?]> = [], more: FlatPart[] = []): Buffer {
-  const parts: FlatPart[] = [
-    { name: '/_rels/.rels', type: RELS, xml: rels(['rId1', `${T}officeDocument`, 'word/document.xml']) },
-    {
-      name: '/word/document.xml',
-      type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml',
-      xml: `<w:document xmlns:w="${W}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>${body}</w:body></w:document>`,
-    },
-  ];
-  if (docRels.length) parts.push({ name: '/word/_rels/document.xml.rels', type: RELS, xml: rels(...docRels) });
-  return flatOpc([...parts, ...more]);
-}
 
 /** A plugin that takes every file and answers `answer`, writing `bytes` when given. It records what it saw. */
 function recorder(answer: 'passed' | 'scrubbed' | 'removed', bytes?: Uint8Array) {
@@ -182,7 +137,7 @@ describe('Flat OPC', () => {
     // A part may use a namespace that the package element declares.
     const inherited = flatOpc(
       [
-        { name: '/_rels/.rels', type: RELS, xml: rels(['rId1', `${T}officeDocument`, 'word/document.xml']) },
+        { name: '/_rels/.rels', type: RELS, xml: partRels(['rId1', `${T}officeDocument`, 'word/document.xml']) },
         { name: '/word/document.xml', type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml', xml: '<w:document><w:body/></w:document>' },
       ],
       ` xmlns:w="${W}"`,

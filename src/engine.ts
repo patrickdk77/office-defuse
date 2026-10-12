@@ -39,7 +39,7 @@ const DEFAULT_LIMITS = {
   rtfDepth: 256,
 };
 
-type Limits = typeof DEFAULT_LIMITS & Pick<OfficeLimits, 'fileSize' | 'timeMs' | 'nestingDepth'>;
+export type Limits = typeof DEFAULT_LIMITS & Pick<OfficeLimits, 'fileSize' | 'timeMs' | 'nestingDepth'>;
 
 function resolveLimits(given: OfficeLimits = {}): Limits {
   return {
@@ -89,7 +89,7 @@ function finish(findings: DefuseFinding[], options: OfficeOptions, incomplete: b
  * code EIO, since the reader would take the shifted bytes for the file. Any error the source throws is kept, and the
  * engine throws it instead of a verdict on the file.
  */
-function guarded(source: ByteSource): ByteSource & { failure?: unknown } {
+export function guarded(source: ByteSource): ByteSource & { failure?: unknown } {
   let size = 0;
   const g: ByteSource & { failure?: unknown } = {
     size: async () => {
@@ -116,7 +116,7 @@ function guarded(source: ByteSource): ByteSource & { failure?: unknown } {
   return g;
 }
 
-type Container = { kind: 'zip'; zip: ZipArchive } | { kind: 'cfb'; cfb: CompoundFile } | { kind: 'rtf' } | { kind: 'xml' };
+export type Container = { kind: 'zip'; zip: ZipArchive } | { kind: 'cfb'; cfb: CompoundFile } | { kind: 'rtf' } | { kind: 'xml' };
 
 const ambiguous = (reason: string) => new StopError(C.Package, D.AmbiguousFormat, `The file is ${reason}`, { reason });
 
@@ -128,7 +128,7 @@ const ambiguous = (reason: string) => new StopError(C.Package, D.AmbiguousFormat
  * that does not fail. A file that starts as XML is a flat OpenDocument file or a Flat OPC package, and one that is a
  * ZIP archive as well is ambiguous.
  */
-async function openContainer(src: ByteSource, size: number, limits: Limits, settings: RunSettings): Promise<Container> {
+export async function openContainer(src: ByteSource, size: number, limits: Limits, settings: RunSettings): Promise<Container> {
   const head = await src.read(0, Math.min(1024, size));
   const cfbSignature = head.length >= 8 && CFB_SIGNATURE.every((b, i) => head[i] === b);
   const rtfSignature = Buffer.from(head.subarray(0, 4)).toString('latin1') === '{\\rt';
@@ -161,7 +161,7 @@ async function openContainer(src: ByteSource, size: number, limits: Limits, sett
 }
 
 /** A run of the engine over one file at `depth`, with the deadline the whole upload shares. */
-function newRun(options: OfficeOptions, depth: number, deadline: number | undefined, verify?: RunState['verify']): RunState {
+export function newRun(options: OfficeOptions, depth: number, deadline: number | undefined, verify?: RunState['verify']): RunState {
   return {
     options,
     depth,
@@ -178,13 +178,29 @@ function newRun(options: OfficeOptions, depth: number, deadline: number | undefi
 }
 
 /** Releases what a run holds: the copies plugins returned and the temporary directory. */
-async function endRun(run: RunState): Promise<void> {
+export async function endRun(run: RunState): Promise<void> {
   try {
     for (const s of run.sources.splice(0)) await s.close?.();
     for (const h of run.held.splice(0)) await h.dispose();
   } finally {
     await run.temp.cleanup();
   }
+}
+
+/** The limits, settings and context a run reads its file with, from the run's options. */
+export function runContext(run: RunState): { limits: Limits; settings: RunSettings; ctx: RunContext } {
+  const options = run.options;
+  const limits = resolveLimits(options.limits);
+  const password = options.password;
+  const settings: RunSettings = {
+    entries: limits.entries,
+    decompressedBytes: limits.decompressedBytes,
+    totalDecompressedBytes: limits.totalDecompressedBytes,
+    rtfDepth: limits.rtfDepth,
+    deadline: run.deadline,
+    passwords: typeof password === 'string' ? [password] : (password ?? []),
+  };
+  return { limits, settings, ctx: new RunContext(new FindingFactory(options.actionOverrides), xmlLimitsOf(limits), settings, run) };
 }
 
 /** The finding a limit error from this package or any other gives at depth 0. */
@@ -198,21 +214,11 @@ function limitFinding(factory: FindingFactory, e: unknown) {
  */
 async function analyze(run: RunState, source: ByteSource): Promise<OfficeInspection> {
   const options = run.options;
-  const limits = resolveLimits(options.limits);
   const deadline = run.deadline;
-  const factory = new FindingFactory(options.actionOverrides);
+  const { limits, settings, ctx } = runContext(run);
+  const factory = ctx.factory;
   const findings: DefuseFinding[] = [];
   const src = guarded(source);
-  const password = options.password;
-  const settings: RunSettings = {
-    entries: limits.entries,
-    decompressedBytes: limits.decompressedBytes,
-    totalDecompressedBytes: limits.totalDecompressedBytes,
-    rtfDepth: limits.rtfDepth,
-    deadline,
-    passwords: typeof password === 'string' ? [password] : (password ?? []),
-  };
-  const ctx = new RunContext(factory, xmlLimitsOf(limits), settings, run);
   const isOutput = run.verify !== undefined;
   try {
     if (limits.nestingDepth !== undefined && run.depth > limits.nestingDepth) throw new NestingLimitError('Nesting limit exceeded');

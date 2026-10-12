@@ -30,18 +30,33 @@ const decrypted = (src: ByteSource, decrypt: StreamDecrypt): ByteSource => ({
 const u32 = (b: Uint8Array, at: number) => (b[at] | (b[at + 1] << 8) | (b[at + 2] << 16) | (b[at + 3] << 24)) >>> 0;
 
 /**
- * Inspects a Word 6.0 to 2003 document: its FIB, whether it is encrypted, the fields in its text and the template it
- * attaches. Returns whether it is a template, or undefined for an `optional` stream that holds no FIB.
+ * The identifier and flags of the FIB a WordDocument stream starts with (MS-DOC 2.5.2), or undefined when it does not
+ * start with the FIB of Word 6.0 to 2003. The FIB's base is never encrypted.
  */
-export async function wordRules(ctx: RunContext, cfb: CompoundFile, stream: CfbEntry, optional = false): Promise<{ template: boolean } | undefined> {
+function fibBase(fib: Uint8Array): { ident: number; flags: number } | undefined {
+  const ident = fib.length >= 32 ? u16(fib, 0) : 0;
+  return ident === WORD8 || ident === WORD6 ? { ident, flags: u16(fib, 10) } : undefined;
+}
+
+/** Whether a WordDocument stream holds a template: its FIB has fDot set. */
+export async function isWordTemplate(cfb: CompoundFile, stream: CfbEntry): Promise<boolean> {
+  const base = fibBase(await cfb.source(stream).read(0, 32));
+  return base !== undefined && (base.flags & 1) === 1;
+}
+
+/**
+ * Inspects a Word 6.0 to 2003 document: its FIB, whether it is encrypted, the fields in its text and the template it
+ * attaches. An `optional` stream that holds no FIB is not read.
+ */
+export async function wordRules(ctx: RunContext, cfb: CompoundFile, stream: CfbEntry, optional = false): Promise<void> {
   let source = cfb.source(stream);
   let fib = await source.read(0, 1024);
-  const ident = fib.length >= 32 ? u16(fib, 0) : 0;
-  if (ident !== WORD8 && ident !== WORD6) {
-    if (optional) return undefined;
+  const base = fibBase(fib);
+  if (!base) {
+    if (optional) return;
     throw new StopError(C.Package, D.Unrecognized, 'The WordDocument stream does not start with a Word FIB', { reason: 'a WordDocument stream without a FIB' });
   }
-  const flags = u16(fib, 10);
+  const { ident, flags } = base;
   const tableEntry = cfb.child(cfb.root, flags & 0x0200 ? '1Table' : '0Table');
   let tableSource = tableEntry?.kind === 'stream' ? cfb.source(tableEntry) : undefined;
   // fEncrypted, set for RC4, RC4 CryptoAPI and XOR obfuscation alike. Word 97 to 2003 documents are read through the
@@ -116,7 +131,6 @@ export async function wordRules(ctx: RunContext, cfb: CompoundFile, stream: CfbE
     }
   }
   fields.finish();
-  return { template: (flags & 1) === 1 };
 }
 
 /** The fc and lcb pairs of a Word 97 FIB, after its variable-length arrays of 16- and 32-bit values. */

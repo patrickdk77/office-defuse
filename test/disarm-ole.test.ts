@@ -207,11 +207,9 @@ describe('disarm: compound files', () => {
 
   it('puts the storages of the compound file a plugin returns in place of an object', async () => {
     const r = await defused(fixture('cases', 'ole-embedded-package.doc'), { filePlugins: [officePlugin()] });
-    const inner = r.before.findings.filter(f => f.attachment);
-    expect(inner.length).to.be.greaterThan(0);
-    const verdict = r.before.findings.find(f => f.category === 'EMBEDDED' && /^PLUGIN_/.test(f.detail));
-    // A bare object storage holds no Office document, so the router-style plugin removes it.
-    expect(verdict?.detail).to.equal('PLUGIN_REMOVED');
+    // A bare object storage holds no Office document, so officePlugin does not take it, and the object's own rule
+    // removes it.
+    expect(r.before.findings.map(f => [`${f.category}/${f.detail}`, f.action, f.attachment])).to.deep.equal([['EMBEDDED/OLE_OBJECT', 'strip', undefined]]);
     const graft: ContainedFilePlugin = {
       kind: 'file',
       name: 'graft',

@@ -331,3 +331,51 @@ export const textBody = (inner: string) => `<office:body><office:text>${inner}</
 
 /** The OLE signature and an inert marker, all office-defuse looks at. */
 export const OLE = Buffer.concat([Buffer.from('d0cf11e0a1b11ae1', 'hex'), Buffer.from('inert marker')]);
+
+/** A flat OpenDocument file of the `media` kind whose root holds `inner`, after an XML declaration and `prolog`. */
+export const flatOdf = (inner: string, media = 'text', prolog = '') =>
+  Buffer.from(
+    `<?xml version="1.0" encoding="UTF-8"?>\n${prolog}<office:document ${ODF_NS} office:version="1.3" office:mimetype="application/vnd.oasis.opendocument.${media}">${inner}</office:document>`,
+    'utf8',
+  );
+
+export interface FlatPart {
+  name: string;
+  type: string;
+  xml?: string;
+  binary?: Uint8Array;
+}
+
+/** The namespace of a Flat OPC package. */
+export const PKG = 'http://schemas.microsoft.com/office/2006/xmlPackage';
+
+/** A Flat OPC package of `parts`, with Word's mso-application processing instruction. */
+export const flatOpc = (parts: FlatPart[], rootAttributes = '') =>
+  Buffer.from(
+    `<?xml version="1.0" standalone="yes"?>\n<?mso-application progid="Word.Document"?>\n<pkg:package xmlns:pkg="${PKG}"${rootAttributes}>${parts
+      .map(
+        p =>
+          `<pkg:part pkg:name="${p.name}" pkg:contentType="${p.type}">${p.xml !== undefined ? `<pkg:xmlData>${p.xml}</pkg:xmlData>` : `<pkg:binaryData>${Buffer.from(p.binary ?? []).toString('base64')}</pkg:binaryData>`}</pkg:part>`,
+      )
+      .join('')}</pkg:package>`,
+    'utf8',
+  );
+
+/** The content type of a relationships part, and one whose relationships are `r`, without an XML declaration. */
+export const RELS = 'application/vnd.openxmlformats-package.relationships+xml';
+export const partRels = (...r: Array<[string, string, string, boolean?]>) =>
+  `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${r.map(([id, type, target, external]) => `<Relationship Id="${id}" Type="${type}" Target="${target}"${external ? ' TargetMode="External"' : ''}/>`).join('')}</Relationships>`;
+
+/** A flat Word document whose body is `body`, with `docRels` from the document and further parts. */
+export function flatWord(body: string, docRels: Array<[string, string, string, boolean?]> = [], more: FlatPart[] = []): Buffer {
+  const parts: FlatPart[] = [
+    { name: '/_rels/.rels', type: RELS, xml: partRels(['rId1', `${T}officeDocument`, 'word/document.xml']) },
+    {
+      name: '/word/document.xml',
+      type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml',
+      xml: `<w:document xmlns:w="${W}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>${body}</w:body></w:document>`,
+    },
+  ];
+  if (docRels.length) parts.push({ name: '/word/_rels/document.xml.rels', type: RELS, xml: partRels(...docRels) });
+  return flatOpc([...parts, ...more]);
+}

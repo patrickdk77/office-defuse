@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1 - 2026-10-11
+
+- `detectOffice` and `detectOfficeSource` tell a router whether office-defuse reads a file. They name its format and MIME type with the functions the inspection names them with, and claim nothing office-defuse cannot name, such as a plain ZIP archive, a NuGet package or an installer. An encrypted OOXML package that no password at hand opens is claimed as a compound file, since only the password names the format inside. `officePlugin` accepts exactly what they claim, so it no longer takes a bare OLE object. The inspection now names the format before it reads on, so an encrypted Word or Excel template is `dot` or `xlt` without its password, and a Flat OPC package rejected after that point reports `xml`.
+
 ## 0.2.0 - 2026-10-11
 
 ### Disarm
