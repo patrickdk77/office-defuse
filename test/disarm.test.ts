@@ -20,6 +20,7 @@ const strips = (r: { findings: Array<{ action: string }> }) => r.findings.filter
 describe('disarm: ZIP packages', () => {
   it('writes every fixture with strip findings so that its output has none, and every clean one unchanged in content', async () => {
     for (const [folder, file] of [
+      ['cases', 'empty-main-part.ppam'],
       ['docs', 'actions.pptx'],
       ['docs', 'customui.docm'],
       ['docs', 'doctype.docx'],

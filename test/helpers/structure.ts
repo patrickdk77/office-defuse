@@ -85,6 +85,8 @@ export async function structureProblems(bytes: Uint8Array): Promise<string[]> {
     for (const e of zip.entries) {
       const ct = typeOf(e.name);
       if (e.directory || ct === undefined || !(ct.endsWith('+xml') || ct === 'application/xml' || ct === VML_TYPE)) continue;
+      // PowerPoint writes an add-in's presentation part empty.
+      if (e.size === 0 && ct === 'application/vnd.ms-powerpoint.addin.macroenabled.main+xml') continue;
       const known = ids.get(nameKey(e.name)) ?? new Set<string>();
       for (const el of elements(await read(zip, e.name), e.name, ct === VML_TYPE)) {
         for (const a of el.attributes) {

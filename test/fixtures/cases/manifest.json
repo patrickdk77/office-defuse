@@ -97,9 +97,15 @@
   },
   {
     "file": "empty-main-part.ppam",
-    "issue": "A main part with no content at all.",
-    "expected": {"status":"rejected","risk":"UNKNOWN","format":"ppam","kinds":["XML/MALFORMED"]},
+    "issue": "An add-in as PowerPoint writes one: an empty presentation part, since an add-in has no slides, and a VBA project. Every real add-in looks like this, and 0.2.1 rejected each one as XML/MALFORMED.",
+    "expected": {"status":"strippable","risk":"HIGH","format":"ppam","kinds":["MACRO/VBA_PROJECT"]},
     "before": {"status":"rejected","risk":"UNKNOWN","format":"ppam","kinds":["XML/MALFORMED"]}
+  },
+  {
+    "file": "empty-main-part.pptx",
+    "issue": "A presentation whose main part is empty. A presentation needs its own part, unlike an add-in, so it stays XML/MALFORMED.",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"pptx","kinds":["XML/MALFORMED"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"pptx","kinds":["XML/MALFORMED"]}
   },
   {
     "file": "encoded-scheme-ole-link.pptx",
@@ -424,6 +430,18 @@
     "issue": "An OpenOffice.org 1.x Calc package, application/vnd.sun.xml.calc, with the 2001 manifest namespace. StarOffice and OpenOffice.org 1.x formats are outside the formats this package reads, so after the manifest's document type is reported as information, the media type stops the run.",
     "expected": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["PACKAGE/UNRECOGNIZED","XML/DOCTYPE"]},
     "before": {"status":"rejected","risk":"UNKNOWN","format":"","kinds":["XML/DOCTYPE"]}
+  },
+  {
+    "file": "ascii-declaration.xlsx",
+    "issue": "Shared strings that declare us-ascii over bytes that are all ASCII, as SharePoint declares the custom XML it writes. ASCII reads the same in UTF-8, and 0.2.1 rejected the workbook as XML/ENCODING.",
+    "expected": {"status":"clean","risk":"NONE","format":"xlsx","kinds":[]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"xlsx","kinds":["XML/ENCODING"]}
+  },
+  {
+    "file": "ascii-declaration-utf8.xlsx",
+    "issue": "Shared strings that declare us-ascii over UTF-8 bytes outside ASCII. A reader that follows the declaration reads other text, so the workbook stays rejected.",
+    "expected": {"status":"rejected","risk":"UNKNOWN","format":"xlsx","kinds":["XML/ENCODING"]},
+    "before": {"status":"rejected","risk":"UNKNOWN","format":"xlsx","kinds":["XML/ENCODING"]}
   },
   {
     "file": "text-outside-root.xlsx",

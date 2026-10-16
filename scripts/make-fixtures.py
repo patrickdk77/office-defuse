@@ -950,6 +950,13 @@ def case_vml_nul():
                           sheet_rels=[rel('rId1', RT + 'vmlDrawing', '../drawings/vmlDrawing1.vml')]))
 
 
+def case_ascii_declaration(text):
+    """Shared strings that declare us-ascii, as SharePoint declares the custom XML it writes."""
+    sst = ('<?xml version="1.0" encoding="us-ascii"?><sst xmlns="%s" count="1" uniqueCount="1"><si><t>%s</t></si></sst>' % (S, text)).encode('utf-8')
+    return zip_bytes(xlsx(parts=[('xl/sharedStrings.xml', sst)], overrides=[('xl/sharedStrings.xml', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml')],
+                          workbook_rels=[rel('rId2', RT + 'sharedStrings', 'sharedStrings.xml')]))
+
+
 def case_xlsb(link=None, macros=False):
     workbook = biff12(131, b'') + biff12(132, b'')
     parts = [('xl/workbook.bin', workbook)]
@@ -2719,7 +2726,11 @@ CASES = [
     ('unclosed-root.odt', lambda: zip_bytes([(n, d.replace(b'</office:document-content>', b'') if n == 'content.xml' else d) for n, d in odf()])),
     ('mismatched-end-tag.docx', lambda: case_doc_with('word/document.xml', word_document('<w:p><w:r><w:t>x</w:r></w:t></w:p>'))),
     ('duplicate-attribute.docx', lambda: case_doc_with('word/document.xml', word_document('<w:p><w:pPr><w:jc w:val="left" w:val="right"/></w:pPr></w:p>'))),
-    ('empty-main-part.ppam', lambda: zip_bytes([(n, b'' if n == 'ppt/presentation.xml' else d) for n, d in pptx(kind='ppam')])),
+    # PowerPoint writes an add-in's presentation part empty, since an add-in has no slides. A presentation needs its own.
+    ('empty-main-part.ppam', lambda: zip_bytes(opc('ppam', 'ppt/presentation.xml', b'', part_rels={'ppt/presentation.xml': [rel('rId1', MSR + 'vbaProject', 'vbaProject.bin')]}, **vba('ppam', 'ppt')))),
+    ('empty-main-part.pptx', lambda: zip_bytes([(n, b'' if n == 'ppt/presentation.xml' else d) for n, d in pptx()])),
+    ('ascii-declaration.xlsx', lambda: case_ascii_declaration('plain text')),
+    ('ascii-declaration-utf8.xlsx', lambda: case_ascii_declaration('caf\u00e9')),
     ('text-outside-root.xlsx', lambda: zip_bytes([(n, d + b'garbage' if n == '_rels/.rels' else d) for n, d in xlsx()])),
     ('vml-nul-character.xlsx', case_vml_nul),
     ('deep-nesting.docx', case_deep_nesting),

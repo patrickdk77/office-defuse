@@ -338,6 +338,9 @@ export class XmlTokenizer {
   /** The XML declaration says standalone="yes". */
   private standalone = false;
   private encoding: XmlEncoding = 'utf-8';
+  /** Set by a declaration of US-ASCII, which agrees with UTF-8 only while every byte is ASCII. */
+  private asciiDeclared = false;
+  private nonAscii = false;
   /** Start tags read so far, which numbers the elements. */
   private elements = 0;
   /** An attribute value of the tag being read referred to an entity of the internal subset. */
@@ -416,6 +419,13 @@ export class XmlTokenizer {
   }
 
   private decode(decoder: TextDecoder, bytes: Uint8Array, more: boolean): string {
+    if (!this.nonAscii)
+      for (const c of bytes)
+        if (c >= 0x80) {
+          this.nonAscii = true;
+          break;
+        }
+    if (this.asciiDeclared && this.nonAscii) this.stop(D.Encoding, 'The declaration says us-ascii, the bytes are not all ASCII');
     try {
       return decoder.decode(bytes, { stream: more });
     } catch {
@@ -430,8 +440,14 @@ export class XmlTokenizer {
     this.standalone = /\bstandalone\s*=\s*(["'])yes\1/.test(body);
     const declared = /\bencoding\s*=\s*(["'])([^"']*)\1/.exec(body)?.[2]?.toLowerCase();
     if (declared === undefined) return;
-    const ok = this.encoding === 'utf-8' ? declared === 'utf-8' || declared === 'utf8' : declared === 'utf-16' || declared === this.encoding;
+    // SharePoint declares us-ascii on the custom XML it writes. ASCII bytes read the same in UTF-8.
+    const ascii = this.encoding === 'utf-8' && (declared === 'us-ascii' || declared === 'ascii');
+    const ok = this.encoding === 'utf-8' ? declared === 'utf-8' || declared === 'utf8' || ascii : declared === 'utf-16' || declared === this.encoding;
     if (!ok) this.stop(D.Encoding, `The declaration says ${declared}, the bytes are ${this.encoding.toUpperCase()}`);
+    if (ascii) {
+      this.asciiDeclared = true;
+      if (this.nonAscii) this.stop(D.Encoding, 'The declaration says us-ascii, the bytes are not all ASCII');
+    }
   }
 
   private feed(text: string, final: boolean): void {

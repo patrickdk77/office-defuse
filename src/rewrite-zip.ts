@@ -252,7 +252,8 @@ async function writeOoxml(run: RunState, zip: ZipArchive, plan: PackagePlan, gra
     for (const [k, p] of graph.parts) {
       const removed = removedIds.get(k);
       const own = plan.parts.get(p.entry.name);
-      if (drops.has(k) || sheets.has(k) || plan.replace.has(k) || !isXmlType(p.contentType) || (!removed && !own && !xpsDrops)) continue;
+      // An empty part, such as the presentation part PowerPoint writes into an add-in, refers to nothing.
+      if (drops.has(k) || sheets.has(k) || plan.replace.has(k) || !isXmlType(p.contentType) || p.entry.size === 0 || (!removed && !own && !xpsDrops)) continue;
       const rules: RewriteRules = {
         element(el) {
           // An XPS element that names a part that went goes with it.

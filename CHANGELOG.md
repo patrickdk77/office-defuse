@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.2 - 2026-10-16
+
+- An add-in's empty presentation part is read and written as it is. PowerPoint writes every `.ppam` that way, since an add-in has no slides, and 0.2.1 rejected each one as XML/MALFORMED. An empty main part in any other format is still rejected.
+- A part that declares us-ascii over bytes that are all ASCII is read as UTF-8, which it is. SharePoint writes such parts into custom XML, and 0.2.1 rejected the whole file as XML/ENCODING. A us-ascii declaration over any byte outside ASCII is still XML/ENCODING.
+
 ## 0.2.1 - 2026-10-11
 
 - `detectOffice` and `detectOfficeSource` tell a router whether office-defuse reads a file. They name its format and MIME type with the functions the inspection names them with, and claim nothing office-defuse cannot name, such as a plain ZIP archive, a NuGet package or an installer. An encrypted OOXML package that no password at hand opens is claimed as a compound file, since only the password names the format inside. `officePlugin` accepts exactly what they claim, so it no longer takes a bare OLE object. The inspection now names the format before it reads on, so an encrypted Word or Excel template is `dot` or `xlt` without its password, and a Flat OPC package rejected after that point reports `xml`.

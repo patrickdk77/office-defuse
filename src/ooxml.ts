@@ -586,6 +586,9 @@ export async function nameOoxml(ctx: ZipContext, contentTypes: ZipEntry): Promis
   return (await readMain(ctx, await readParts(ctx, contentTypes))).format;
 }
 
+/** The content type of an add-in's presentation part, which PowerPoint writes empty. */
+const PPAM_MAIN = 'application/vnd.ms-powerpoint.addin.macroenabled.main+xml';
+
 /**
  * Inspects an OOXML package. The package relationships come first, since they name the main part and so the format.
  * Then each part is read in archive order, followed by its relationships, which are reported as they are read and
@@ -633,6 +636,9 @@ export async function inspectOoxml(ctx: ZipContext, contentTypes: ZipEntry, oute
     if (ct === undefined) {
       if (ctx.report(C.Package, D.UntypedPart, p.entry.name, { part: p.entry.name }).action === 'strip') plan.drop.add(key);
       p.ole = await ctx.drain(p.entry);
+    } else if (format.format === 'ppam' && p.entry.size === 0 && ct.toLowerCase() === PPAM_MAIN) {
+      // PowerPoint writes an add-in's presentation part empty, since an add-in has no slides.
+      await ctx.drain(p.entry);
     } else if (isXmlType(ct)) {
       const rules = new PartRules(ctx, p.entry.name);
       await ctx.parse(p.entry, rules, ct === TYPE.vml);

@@ -292,7 +292,7 @@ A writer that streams an entry sets the data descriptor flag and may leave the l
 
 The XML tokenizer reads each part in pieces. It refuses these, and stops the run:
 
-- XML/ENCODING: anything but UTF-8 or UTF-16, the two encodings OPC allows, an encoding declaration that disagrees with the bytes, and bytes that are not valid in their encoding.
+- XML/ENCODING: anything but UTF-8 or UTF-16, the two encodings OPC allows, an encoding declaration that disagrees with the bytes, and bytes that are not valid in their encoding. A declaration of us-ascii agrees with UTF-8 bytes as long as every byte is ASCII, since both read them the same. SharePoint writes such declarations into custom XML parts.
 - XML/MALFORMED: markup that breaks XML 1.0 or its namespaces. That covers an undeclared prefix, a duplicate attribute, a mismatched end tag, an element or text outside the root, a malformed name, reference or declaration, and characters XML 1.0 forbids. It also covers what XML 1.0 refuses about entities: a reference to an entity nothing declares, a reference to an external entity in an attribute value, entity text that refers to itself or leaves an element open, and a markup declaration outside the document type declaration.
 
 References get expanded and line ends normalized as the XML specification says, so `DD&#69;AUTO` reads as `DDEAUTO`.

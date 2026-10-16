@@ -184,7 +184,7 @@ describe('detectOffice', () => {
       ['a WordDocument stream without a Word FIB', fixture('cases', 'ole-other-word-identifier.doc'), 'doc'],
       ['a Workbook stream without a BOF record', fixture('ole', 'no-bof.xls'), 'xls'],
       ['an entry whose CRC is wrong', fixture('cases', 'wrong-crc.docx'), 'docx'],
-      ['an empty main part', fixture('cases', 'empty-main-part.ppam'), 'ppam'],
+      ['an empty presentation part, which only an add-in may have', fixture('cases', 'empty-main-part.pptx'), 'pptx'],
       ['an encrypted OpenDocument package', fixture('docs', 'encrypted.odt'), 'odt'],
       ['a flat OpenDocument file cut short', flatOdf(textBody('<text:p>x</text:p>')).subarray(0, -30), 'fodt'],
       [
