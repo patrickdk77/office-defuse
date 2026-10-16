@@ -118,7 +118,7 @@ Detection does not claim a file whose format office-defuse cannot name. That cov
 
 In a ZIP package:
 
-- VBA projects, Excel 4.0 macro sheets, and OpenDocument `Basic/`, `Scripts/` and `Dialogs/` folders. These go by content type, relationship type or folder name, and a folder counts when it holds a file that is not empty. office-defuse parses no OLE part of a package, such as `vbaProject.bin`.
+- VBA projects, Excel 4.0 macro sheets, and OpenDocument `Basic/`, `Scripts/` and `Dialogs/` folders. These go by content type, relationship type or folder name, and a folder counts when it holds a file that is not empty. office-defuse parses no OLE part of a package, such as `vbaProject.bin`, unless `scriptPlugins` is set. Then it reads the VBA project, as [Script plugins](#script-plugins) says.
 - OpenDocument script event listeners that name a script URL or macro. Those that fire as the document opens or is created get a finding of their own. LibreOffice ignores a listener whose URL and macro name are both empty, and so does office-defuse. Visio ShapeSheet cells that call RUNADDON, RUNADDONWARGS, CALLTHIS, RUNMACRO, OPENFILE or DOOLEVERB.
 - Links and actions that run macros: `vnd.sun.star.script:` and `macro:` targets, PowerPoint's `ppaction://macro`, Excel drawing shapes with a `macro` attribute, and form controls with an `x:FmlaMacro`. Ribbon callbacks such as `onLoad` and `onAction`. OpenDocument menu, toolbar and key settings under `Configurations2/`. LibreOffice writes an empty `Configurations2/accelerator/current.xml` into the documents it saves, and an empty file counts for nothing.
 - Excel defined names that run a macro sheet: Auto_Open and Auto_Activate as MACRO/EVENT_ON_OPEN, Auto_Close and Auto_Deactivate as MACRO/EVENT. A name counts when it starts with one of these, as `Auto_Open2` does.
@@ -200,7 +200,7 @@ The check reads the output with the caller's overrides and limits, without `file
 - A part loses its root element only by going whole. Edits happen in place, and everything the rewrite does not touch keeps its characters, in the part's own encoding, UTF-8 or UTF-16, behind its own byte order mark.
 - A Word field a strip finding names loses its begin, separator and end marks and its code, nested fields included, and keeps its result. A `w:fldSimple` keeps the runs inside it.
 - An Excel 4.0 macro sheet becomes an empty worksheet of the same name, with the worksheet content type and relationship type, so the indexes of the sheets after it stay right. A defined name that runs a macro goes. So does a formula that calls DDE, and its cell keeps its cached value.
-- A drawing shape loses its `macro` attribute, a ribbon control its callbacks, and a PowerPoint shape an action that runs a program, a macro or an object verb. A Visio cell that calls code goes.
+- A drawing shape loses its `macro` attribute, a ribbon control its callbacks, and a PowerPoint shape an action that runs a program, a macro or an object verb. A Visio cell that calls code goes. When script plugins keep the document's VBA project, a shape, form control, callback, action or MACROBUTTON field that runs one of its macros by name stays.
 - The main part keeps its content type, so a `.docm` without its VBA project is still a `.docm`.
 - In an OpenDocument package, `mimetype` comes first, stored, without an extra field, and holds the media type without white space. A package without one gets one, and a package without a manifest gets a manifest listing its entries. `Basic/`, `Scripts/`, `Dialogs/` and `Configurations2/` go whole. An entry goes with its manifest entry and with every element whose `xlink:href` names it. A link `text:a` or `draw:a` keeps what it holds. A form control loses its link, and a cell loses a formula that calls DDE. An embedded OLE object goes and the preview image beside it stays.
 - A document type declaration with an internal subset goes when XML/INTERNAL_SUBSET strips it. Each reference to an internal entity is written out as its text, markup included, and each start tag whose attributes the declarations changed or added to is written out whole, namespace declarations included. The part then reads as the inspection read it. References to external entities go when XML/EXTERNAL_ENTITY strips them. If that finding is overridden to `info` while the subset would go, the references still need their declarations, so the declaration stays and the check of the output reports it.
@@ -216,7 +216,7 @@ A Flat OPC package is rewritten as the package of its parts is, then written bac
 
 ### Compound files
 
-The rewrite writes a new compound file, version 3 with 512-byte sectors, without the streams and storages a strip finding names: VBA project storages, the storages of embedded objects, linked objects and ActiveX controls, Excel's `Ctls` stream, and Outlook attachments. A message's property stream counts its attachments, and the count drops by the ones that went.
+The rewrite writes a new compound file, version 3 with 512-byte sectors, without the streams and storages a strip finding names: VBA project storages, the storages of embedded objects, linked objects and ActiveX controls, Excel's `Ctls` stream, and Outlook attachments. A VBA project that script plugins keep is written without its compiled code. A message's property stream counts its attachments, and the count drops by the ones that went.
 
 The FAT comes right after the header, so no stream lands in the first 1024 bytes, where PDF readers look for a header. When a stream ends with a ZIP end record, as an embedded package does, free sectors of zeros follow the last stream until the record is more than 65,557 bytes from the end of the file, past where ZIP readers look.
 
@@ -260,6 +260,40 @@ The plugin context has `depth`, the file's depth in the upload, and `deadline`, 
 const { disarmOffice, officePlugin } = require('@patrickdk77/office-defuse');
 
 await disarmOffice(bytes, { filePlugins: [officePlugin()] });
+```
+
+## Script plugins
+
+`scriptPlugins` takes script plugins that decide about VBA. office-defuse reads a VBA project's dir stream and modules as MS-OVBA describes them, and shows each module to the plugins as a `ContainedScript`:
+
+| Field | What it holds |
+|---|---|
+| `text` | The module's source, decoded with the project's code page |
+| `trigger` | `vba-document`, `vba-standard`, `vba-class` or `vba-form`, as the PROJECT stream lists the module |
+| `location` | Where the module sits, such as `xl/vbaProject.bin > VBA/Module1` |
+| `fieldName` | The module's name |
+| `language`, `form` | `vba` and `office` |
+| `references` | On the first module only, the project's references, each `{ name, kind, libid }` |
+
+The first plugin whose `accepts` returns true decides a module. A module it passes gets MACRO/PLUGIN_PASSED, `info`. Any other answer, `scrubbed` included, is MACRO/PLUGIN_REMOVED, and an error is MACRO/PLUGIN_FAILED, both `strip`, since office-defuse writes no module a plugin rewrote. The plugin's findings go into the report as they are.
+
+The project stays when every module passed. Otherwise it goes, as it does without plugins, and so does a project with a module no plugin took. A project that stays is written without its compiled code, the way Mandiant's OfficePurge writes one. Each module stream holds only its source, compressed again, the dir stream says each source starts at 0, `_VBA_PROJECT` names no VBA version, and the `__SRP_` caches go. Office then compiles the source the plugins read, so p-code that does something other than its source, which VBA stomping relies on, never runs. MACRO/COMPILED_CODE, `strip`, reports the purge, and MACRO/VBA_PROJECT turns to `info`.
+
+A user form stays with its project when its designer storage holds Forms 2.0 controls only. The designer must be the UserForm designer, the storages under it must be Forms 2.0 forms, frames and multipages, and every form's class table must be empty, since a class table can name any ActiveX control. A form that fails gets CONTROL/ACTIVEX at its designer, and while that finding strips, the project goes.
+
+When the document's own project stays, so does what runs its macros by name: an Excel shape's `macro`, a form control's `x:FmlaMacro`, a ribbon callback, PowerPoint's `ppaction://macro` and Word's MACROBUTTON field. Their findings turn to `info`. A name that points into another file, as `'other.xlsm'!Macro`, still goes.
+
+office-defuse decides the `vbaProject.bin` part of an OOXML package, which with `scriptPlugins` set, even to an empty list, goes to the script plugins and not to the file plugins. It decides the project storages of a Word document, a workbook and the other compound files. A project inside an embedded object is for the file plugins that take the object. A PowerPoint 97 project sits compressed in records the rewrite does not change, so it goes as before.
+
+A source that does not decompress, or a dir stream that names a module stream that is not there, leaves nothing to check. The project goes, and MACRO/VBA_PROJECT's `data.reason` says why. The check of the output does not ask the plugins again. It matches the project by the MD5 of its references and module sources, reports the plugins' findings again, and reports MACRO/COMPILED_CODE if the output still holds p-code, which fails the check.
+
+[script-defuse](https://github.com/patrickdk77/script-defuse)'s `formScriptPlugin` is a script plugin for VBA:
+
+```js
+const { disarmOffice } = require('@patrickdk77/office-defuse');
+const { formScriptPlugin } = require('@patrickdk77/script-defuse');
+
+await disarmOffice(bytes, { scriptPlugins: [formScriptPlugin()] });
 ```
 
 ## The containers
@@ -402,6 +436,7 @@ The bands are NONE at 0, LOW from 1, MEDIUM from 25, HIGH from 50 and CRITICAL f
 | `actionOverrides` | none | Change the action for a category, or for a category and detail |
 | `scoreWeights`, `scoreBands` | built in | Change the scoring |
 | `filePlugins` | none | Plugins that decide about the files inside the file. See [File plugins](#file-plugins) |
+| `scriptPlugins` | none | Plugins that decide about the modules of a VBA project. See [Script plugins](#script-plugins) |
 | `tempDir` | `os.tmpdir()` | Where temporary files go |
 | `memoryThreshold` | 8 MiB | Disarm keeps its copy of the upload, its output and each file it shows a plugin in memory up to this size, and in a temporary file past it. The copies plugins return share this much memory while they wait for the rewrite |
 
@@ -447,8 +482,8 @@ Exit codes are 0 for clean, 1 for defused or strippable, 2 for rejected and 3 fo
 
 ## What it does not check
 
-- The OLE parts of a ZIP package, such as `vbaProject.bin`, the objects inside `oleObject*.bin`, and ActiveX binaries. office-defuse hands them to the file plugins and reads none of them itself.
-- VBA source. A VBA project is reported whole, and its modules go unread.
+- The OLE parts of a ZIP package, such as the objects inside `oleObject*.bin` and ActiveX binaries, and `vbaProject.bin` without script plugins. office-defuse hands them to the file plugins and reads none of them itself.
+- VBA source. office-defuse reads the modules only to show them to script plugins, and without plugins reports a project whole. In a user form that stays, the controls' data and pictures in its `o` stream go unread.
 - Encrypted Word 6.0 and 95 documents. They are rejected. In a Word document encrypted with RC4 CryptoAPI, the OLE objects that Word keeps in the Data stream rather than in ObjectPool. The pictures of an encrypted presentation.
 - Formulas in .xlsb sheets, and in an Excel 5.0 or 95 workbook. A DDE link that a formula uses is found in the workbook's link records.
 - Hyperlinks in a Visio .vsd, ShapeSheet cells in a drawing from Visio 5.0 or earlier, and anything in Publisher and Project files but VBA projects and objects.

@@ -70,6 +70,22 @@ export interface RunState {
   sources: ByteSource[];
   /** The container, once the format rules have read it. */
   output?: Output;
+  /**
+   * The document's own VBA project stays, as the script plugins passed it. The buttons, shapes, callbacks and fields
+   * that run one of its macros by name then stay too.
+   */
+  macrosKept?: boolean;
+}
+
+/** A macro of the document's own project, by name: Macro, Module.Macro, or Excel's [0]!Macro for this workbook. */
+const OWN_MACRO = /^(?:\[0\]!)?[\p{L}_][\p{L}\p{N}_]*(?:\.[\p{L}_][\p{L}\p{N}_]*)?$/u;
+
+/**
+ * 'info' for a link or callback that runs one of the document's own macros when its project stays, so the finding
+ * reports it without removing it. Undefined otherwise, leaving the action to the overrides.
+ */
+export function ownMacro(run: RunState, name: string): 'info' | undefined {
+  return run.macrosKept && OWN_MACRO.test(name.trim()) ? 'info' : undefined;
 }
 
 /** A finding the rules made, with its action, which the rewrite reads. Past 200 of one kind, `finding` is absent. */

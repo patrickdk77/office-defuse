@@ -1,12 +1,16 @@
 import { autoName } from './biff';
-import { decideContained, presence } from './contained';
-import { clip, type Reported, type ZipContext } from './context';
+import { CompoundFile } from './cfb';
+import { type ContainedDecision, decideContained, presence } from './contained';
+import { clip, ownMacro, type Reported, type ZipContext } from './context';
 import { StopError } from './errors';
 import { FieldStack } from './fields';
 import { type Format, OOXML_FORMATS, XPS_FORMATS, XPS_SEQUENCE } from './formats';
 import { FunctionCalls, Quotes } from './formulas';
+import { SpillSink } from './io';
 import { isAbsoluteTarget, isFragment } from './links';
-import { attributeKey } from './plan';
+import { compoundRules, nestedNotes } from './objects';
+import { attributeKey, CompoundPlan } from './plan';
+import { writeCompound } from './rewrite-cfb';
 import { OfficeCategory as C, OfficeDetail as D } from './types';
 import { XlsbLinks } from './xlsb';
 import { attr, UNKNOWN, unknownEntity, type XmlElement, type XmlHandler } from './xml';
@@ -121,6 +125,8 @@ export interface Part {
   /** The parts its own relationships reach. */
   targets: Set<Part>;
   ole: boolean;
+  /** For a VBA project part read before the XML parts, what became of it. */
+  vba?: ContainedDecision;
 }
 
 /** What the rewrite needs of an OOXML package: its parts, which part each relationships part belongs to, and the roots. */
@@ -370,8 +376,8 @@ class PartRules implements XmlHandler {
       if (el.depth === 1) this.ctx.report(C.Ui, D.Ribbon, this.part);
       for (const a of el.attributes) {
         if (a.ns !== '' || !a.value.trim() || !/^(on[A-Z]|get[A-Z]|loadImage$)/.test(a.local)) continue;
-        // The callback goes and the control stays, doing nothing.
-        if (this.ctx.report(C.Ui, D.Callback, this.part, { callback: `${a.local}=${clip(a.value)}` }).action === 'strip') {
+        // The callback goes and the control stays, doing nothing, unless it calls a macro of a project that stays.
+        if (this.ctx.report(C.Ui, D.Callback, this.part, { callback: `${a.local}=${clip(a.value)}` }, ownMacro(this.ctx.run, a.value)).action === 'strip') {
           this.ctx.plan.element(this.part, el.index, { strip: new Set([attributeKey('', a.local)]) });
         }
       }
@@ -395,7 +401,7 @@ class PartRules implements XmlHandler {
     } else if (XDR_NS.has(ns)) {
       const macro = attr(el, '', 'macro');
       // The shape stays, and clicking it runs nothing.
-      if (macro?.trim() && this.ctx.report(C.Macro, D.Link, this.part, { macro: clip(macro) }).action === 'strip') {
+      if (macro?.trim() && this.ctx.report(C.Macro, D.Link, this.part, { macro: clip(macro) }, ownMacro(this.ctx.run, macro)).action === 'strip') {
         this.ctx.plan.element(this.part, el.index, { strip: new Set([attributeKey('', 'macro')]) });
       }
     } else if (ns === VML_EXCEL_NS && el.local === 'FmlaMacro') this.macroText = { shown: new Shown(), index: el.index };
@@ -442,7 +448,8 @@ class PartRules implements XmlHandler {
       this.formula = undefined;
     }
     if (ns === VML_EXCEL_NS && el.local === 'FmlaMacro' && this.macroText) {
-      if (this.macroText.shown.content) this.remove(this.ctx.report(C.Macro, D.Link, this.part, { macro: clip(this.macroText.shown.text.trim()) }), this.macroText);
+      const macro = this.macroText.shown.text.trim();
+      if (this.macroText.shown.content) this.remove(this.ctx.report(C.Macro, D.Link, this.part, { macro: clip(macro) }, ownMacro(this.ctx.run, macro)), this.macroText);
       this.macroText = undefined;
     }
     if (this.hyperlinkBase && EXTENDED_NS.has(ns) && el.local === 'HyperlinkBase') {
@@ -476,8 +483,10 @@ class PartRules implements XmlHandler {
     const id = el.attributes.find(a => a.local === 'id' && R_NS.has(a.ns.toLowerCase()))?.value;
     const data = { trigger: el.local, action: clip(written), ...(id === undefined ? {} : { relationship: clip(id) }) };
     if (action.startsWith('ppaction://program')) this.remove(this.ctx.report(C.Action, D.RunProgram, this.part, data), el);
-    else if (action.startsWith('ppaction://macro')) this.remove(this.ctx.report(C.Macro, D.Link, this.part, data), el);
-    else if (action.startsWith('ppaction://ole')) this.remove(this.ctx.report(C.Action, D.OleVerb, this.part, data), el);
+    else if (action.startsWith('ppaction://macro')) {
+      const name = /[?&]name=([^&]*)/i.exec(written)?.[1] ?? '';
+      this.remove(this.ctx.report(C.Macro, D.Link, this.part, data, ownMacro(this.ctx.run, safeDecode(name))), el);
+    } else if (action.startsWith('ppaction://ole')) this.remove(this.ctx.report(C.Action, D.OleVerb, this.part, data), el);
   }
 
   private visioCell(el: XmlElement): void {
@@ -628,6 +637,9 @@ export async function inspectOoxml(ctx: ZipContext, contentTypes: ZipEntry, oute
 
   const { format, strict, xps } = await readMain(ctx, typed, (rels, r) => relate(rels, undefined, r));
   ctx.format = outer ?? format;
+  // A VBA project goes to the script plugins before the XML parts are read, whose buttons and callbacks keep running
+  // its macros only when it stays.
+  if (ctx.run.options.scriptPlugins !== undefined) for (const p of parts.values()) if (TYPE.vba.has(p.contentType ?? '')) p.vba = await vbaPart(ctx, p.entry, p.entry.name);
 
   // OPC has no folders. A directory entry is still inflated once, so its bytes are checked like any other.
   for (const entry of ctx.zip.entries) if (entry.directory) await ctx.drain(entry);
@@ -686,10 +698,12 @@ async function partRules(ctx: ZipContext, p: Part): Promise<void> {
   // to the plugins. Such a part has no rule of its own, so one no plugin takes stays.
   const wholeFile = !isXmlType(p.contentType) && !formatBinary(ct);
   const contained = vba || ole || pkg || controlBinary || p.ole || wholeFile;
-  const decision = contained ? await decideContained(ctx, { name: loc, declaredType: ct || undefined, location: loc, chunks: () => ctx.zip.read(p.entry) }) : undefined;
+  // With script plugins, a VBA project part is read here, so its modules go to them, rather than to the file plugins.
+  const vbaDecision = p.vba ?? (vba && ctx.run.options.scriptPlugins !== undefined ? await vbaPart(ctx, p.entry, loc) : undefined);
+  const decision = vbaDecision ?? (contained ? await decideContained(ctx, { name: loc, declaredType: ct || undefined, location: loc, chunks: () => ctx.zip.read(p.entry) }) : undefined);
   const act = presence(decision);
   const found: Reported[] = [];
-  if (vba) found.push(ctx.report(C.Macro, D.VbaProject, loc, data, act));
+  if (vba && !vbaDecision) found.push(ctx.report(C.Macro, D.VbaProject, loc, data, act));
   // A macro sheet becomes an empty worksheet, so the indexes of the sheets after it stay right.
   if ((TYPE.macrosheet.has(ct) || as(AS.macrosheet)) && ctx.report(C.Macro, D.XlmMacrosheet, loc, data).action === 'strip') ctx.plan.sheets.add(key);
   if (ole) found.push(ctx.report(C.Embedded, D.OleObject, loc, data, act));
@@ -698,6 +712,49 @@ async function partRules(ctx: ZipContext, p: Part): Promise<void> {
   if (p.ole && !vba && !ole && !control && !controlBinary && !pkg) found.push(ctx.report(C.Embedded, D.OleFile, loc, data, act));
   if (decision ? !decision.keep : found.some(f => f.action === 'strip')) ctx.plan.drop.add(key);
   else if (decision?.replacement) ctx.plan.replace.set(key, decision.replacement);
+}
+
+/**
+ * A VBA project part, read as the compound file it is: the rules every compound file gets, which show the project to
+ * the script plugins and the storages of its forms to the file plugins. The part stays, as the rewrite writes it, when
+ * the project does.
+ */
+async function vbaPart(ctx: ZipContext, entry: ZipEntry, loc: string): Promise<ContainedDecision> {
+  const run = ctx.run;
+  const copy = new SpillSink(run.temp, run.threshold);
+  run.held.push(copy);
+  for await (const c of ctx.zip.read(entry)) await copy.write(c);
+  await copy.close();
+  const source = copy.source();
+  run.sources.push(source);
+  let cfb: CompoundFile;
+  try {
+    cfb = await CompoundFile.open(source, ctx.settings, run.deadline);
+  } catch (e) {
+    if (!(e instanceof StopError) || e.category !== C.Container) throw e;
+    ctx.report(C.Macro, D.VbaProject, loc, { part: loc, reason: clip(`its compound file does not read: ${e.message}`) });
+    return { keep: false };
+  }
+  nestedNotes(ctx, cfb, loc);
+  const plan = new CompoundPlan();
+  await compoundRules(ctx, cfb, loc, false, plan);
+  const vba = cfb.child(cfb.root, 'VBA');
+  if (!vba) ctx.report(C.Macro, D.VbaProject, loc, { part: loc, reason: 'it holds no VBA storage' });
+  if (!vba || plan.drop.has(vba)) return { keep: false };
+  const out = new SpillSink(run.temp, run.threshold);
+  run.held.push(out);
+  await writeCompound(run, cfb, plan, out);
+  await out.close();
+  return { keep: true, replacement: out };
+}
+
+/** A percent-encoded value, or the value as written when it does not decode. */
+function safeDecode(v: string): string {
+  try {
+    return decodeURIComponent(v);
+  } catch {
+    return v;
+  }
 }
 
 /** Parts that no chain of internal relationships reaches from the package. */

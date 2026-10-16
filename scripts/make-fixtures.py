@@ -2648,6 +2648,169 @@ def case_starred_groups():
     return rtf('{\\object\\objemb\\objupdate{\\*\\objdata ' + digits + '}}')
 
 
+# ---------- VBA projects (MS-OVBA), for the script plugins ----------
+
+
+def ovba_compress(data):
+    """An MS-OVBA CompressedContainer (2.4.1) with every token a literal, which the format allows: a flag byte of zeros
+    before each eight bytes. A full chunk of literals is longer than 4,096 bytes, so it is written raw. This is not
+    office-defuse's compressor, so the tests read what another writer wrote."""
+    out = bytearray(b'\x01')
+    for start in range(0, len(data), 4096):
+        chunk = data[start:start + 4096]
+        if len(chunk) == 4096:
+            out += struct.pack('<H', 0x3FFF) + chunk
+            continue
+        body = bytearray()
+        for i in range(0, len(chunk), 8):
+            body.append(0)
+            body += chunk[i:i + 8]
+        assert len(body) <= 4096, 'a last chunk of literals past 4,096 bytes'
+        out += struct.pack('<H', 0xB000 | (len(body) - 1)) + body
+    return bytes(out)
+
+
+class VbaModule:
+    """A module: its name, 'document', 'standard', 'class' or 'form', its source, and the p-code before the source."""
+    def __init__(self, name, kind, source, pcode=b'\x01\x16\x03\x00inert p-code'):
+        self.name, self.kind, self.pcode = name, kind, pcode
+        self.source = ('Attribute VB_Name = "%s"\r\n%s' % (name, source)).encode('cp1252')
+
+
+def dir_record(rid, data):
+    return struct.pack('<HI', rid, len(data)) + data
+
+
+def vba_dir(modules, references=()):
+    """A dir stream (MS-OVBA 2.3.4.2): the project's information records, its references, then each module's records."""
+    r = dir_record(0x0001, struct.pack('<I', 1)) + dir_record(0x0002, struct.pack('<I', 0x0409)) + dir_record(0x0014, struct.pack('<I', 0x0409))
+    r += dir_record(0x0003, struct.pack('<H', 1252)) + dir_record(0x0004, b'VBAProject')
+    r += dir_record(0x0005, b'') + dir_record(0x0040, b'') + dir_record(0x0006, b'') + dir_record(0x003D, b'')
+    r += dir_record(0x0007, struct.pack('<I', 0)) + dir_record(0x0008, struct.pack('<I', 0))
+    # PROJECTVERSION says 4 bytes and holds 6: a major version of 4 bytes and a minor one of 2.
+    r += struct.pack('<HIIH', 0x0009, 4, 1, 0)
+    r += dir_record(0x000C, b'') + dir_record(0x003C, b'')
+    for name, libid in references:
+        lib = libid.encode()
+        r += dir_record(0x0016, name.encode()) + dir_record(0x003E, name.encode('utf-16-le'))
+        r += dir_record(0x000D, struct.pack('<I', len(lib)) + lib + struct.pack('<IH', 0, 0))
+    r += dir_record(0x000F, struct.pack('<H', len(modules))) + dir_record(0x0013, struct.pack('<H', 0xFFFF))
+    for m in modules:
+        name, wide_name = m.name.encode(), m.name.encode('utf-16-le')
+        r += dir_record(0x0019, name) + dir_record(0x0047, wide_name) + dir_record(0x001A, name) + dir_record(0x0032, wide_name)
+        r += dir_record(0x001C, b'') + dir_record(0x0048, b'') + dir_record(0x0031, struct.pack('<I', len(m.pcode)))
+        r += dir_record(0x001E, struct.pack('<I', 0)) + dir_record(0x002C, struct.pack('<H', 0xFFFF))
+        r += dir_record(0x0021 if m.kind == 'standard' else 0x0022, b'') + dir_record(0x002B, b'')
+    return ovba_compress(r + dir_record(0x0010, b''))
+
+
+def project_stream(modules):
+    """The PROJECT stream (MS-OVBA 2.3.1), which says what kind each module is."""
+    lines = ['ID="{4E0F3C9A-1B2D-4C5E-8F70-9A1B2C3D4E5F}"']
+    for m in modules:
+        lines.append({'document': 'Document=%s/&H00000000', 'standard': 'Module=%s', 'class': 'Class=%s', 'form': 'BaseClass=%s'}[m.kind] % m.name)
+    lines += ['Name="VBAProject"', 'HelpContextID="0"', 'VersionCompatible32="393222000"', '', '[Host Extender Info]', '&H00000001={3832D640-CF90-11CF-8E43-00A0C911005A};VBE;&H00000000', '']
+    return '\r\n'.join(lines).encode()
+
+
+FORM_CLASS = 'C62A69F0-16DC-11CE-9E98-00AA00574A4F'
+
+
+def form_designer(name, foreign_class=None):
+    """A user form's designer storage (MS-OVBA 2.2.10): \x03VBFrame names the UserForm designer, and the f stream is a
+    FormControl (MS-OFORMS 2.2.10.1) whose class table is empty, or names `foreign_class`."""
+    vbframe = ('VERSION 5.00\r\nBegin {%s} %s \r\n   Caption = "Inert form"\r\n   ClientHeight = 1200\r\n   ClientWidth = 2400\r\nEnd\r\n' % (FORM_CLASS, name)).encode()
+    # Version 0.4, cbForm, a property mask with fBooleanProperties, and BooleanProperties with FORM_FLAG_ENABLED.
+    props = struct.pack('<II', 1 << 6, 0x04)
+    f = b'\x00\x04' + struct.pack('<H', len(props)) + props
+    if foreign_class:
+        # One SiteClassInfo: Version, cbClassTable, a property mask with fClsid, and the class id.
+        f += struct.pack('<HHHI', 1, 0, 20, 1 << 1) + clsid_bytes(foreign_class)
+    else:
+        f += struct.pack('<H', 0)
+    f += struct.pack('<II', 0, 0)
+    return Storage(name, [Stream('\x01CompObj', comp_obj('Microsoft Forms 2.0 Form', 'Forms.Form.1')), Stream('\x03VBFrame', vbframe), Stream('f', f), Stream('o', b'')])
+
+
+def vba_storages(modules, references=(), source_of=None):
+    """The streams and storages of a VBA project: PROJECT, PROJECTwm, the VBA storage with dir, _VBA_PROJECT, a
+    performance cache and each module, and a designer for each form. A module stream holds its p-code, then its source
+    compressed, or what `source_of` gives for it."""
+    streams = [Stream('dir', vba_dir(modules, references)), Stream('_VBA_PROJECT', b'\xcc\x61\xb5\x00\x00\x03\x00inert performance cache'), Stream('__SRP_0', b'inert cache')]
+    for m in modules:
+        streams.append(Stream(m.name, m.pcode + (source_of(m) if source_of else ovba_compress(m.source))))
+    designers = [form_designer(m.name) for m in modules if m.kind == 'form']
+    return [Stream('PROJECT', project_stream(modules)), Stream('PROJECTwm', b''.join(m.name.encode() + b'\0' + m.name.encode('utf-16-le') + b'\0\0' for m in modules) + b'\0'), Storage('VBA', streams)] + designers
+
+
+VBA_WORKBOOK = VbaModule('ThisWorkbook', 'document', 'Sub Workbook_Open()\r\n    inertOpened = True\r\n    Worksheets(1).Cells(2, 3).Value = "Inert ready"\r\nEnd Sub\r\n')
+VBA_TOTALS = VbaModule('Sums', 'standard', "Public Sub SumColumn()\r\n    ' Puts the sum of the inert column under it.\r\n    Dim inertSum As Double, row As Long\r\n"
+                       '    For row = 3 To 12\r\n        inertSum = inertSum + Cells(row, 4).Value\r\n    Next row\r\n    Cells(13, 4).Value = inertSum\r\n    MsgBox "Inert sum " & inertSum\r\nEnd Sub\r\n')
+VBA_SHELL = VbaModule('Sums', 'standard', 'Public Sub SumColumn()\r\n    Shell "inert-program.exe", vbHide\r\nEnd Sub\r\n')
+VBA_FORM = VbaModule('PickForm', 'form', 'Sub PickDone()\r\n    Me.Hide\r\nEnd Sub\r\n')
+VBA_DOCUMENT = VbaModule('ThisDocument', 'document', 'Public Sub CountInertWords()\r\n    MsgBox "Inert words: " & ActiveDocument.Words.Count\r\nEnd Sub\r\n')
+
+
+def vba_bin(modules, references=(), source_of=None, extra=()):
+    return cfb(vba_storages(modules, references, source_of) + list(extra))
+
+
+def macro_xlsm(project, vml_macro=None):
+    """An .xlsm with `project` as its vbaProject part, and a form-control button that runs `vml_macro` when given."""
+    parts = [('xl/vbaProject.bin', project)]
+    overrides = [('xl/vbaProject.bin', 'application/vnd.ms-office.vbaProject')]
+    sheet, sheet_rels, defaults = '<sheetData/>', [], []
+    if vml_macro:
+        shape = ('<v:shape id="_x0000_s1025" type="#_x0000_t201" o:button="t"><v:textbox><div>Add</div></v:textbox>'
+                 '<x:ClientData ObjectType="Button"><x:FmlaMacro>%s</x:FmlaMacro></x:ClientData></v:shape>' % vml_macro)
+        parts.append(('xl/drawings/vmlDrawing1.vml', vml_drawing(shape)))
+        defaults.append(('vml', VML))
+        sheet = '<sheetData/><legacyDrawing r:id="rId1"/>'
+        sheet_rels.append(rel('rId1', RT + 'vmlDrawing', '../drawings/vmlDrawing1.vml'))
+    return zip_bytes(xlsx(kind='xlsm', sheet=sheet, parts=parts, overrides=overrides, defaults=defaults, sheet_rels=sheet_rels, workbook_rels=[rel('rId2', MSR + 'vbaProject', 'vbaProject.bin')]))
+
+
+def macro_docm(project):
+    return zip_bytes(docx('<w:p/>', kind='docm', part_rels={'word/document.xml': [rel('rId2', MSR + 'vbaProject', 'vbaProject.bin')]},
+                          parts=[('word/vbaProject.bin', project)], overrides=[('word/vbaProject.bin', 'application/vnd.ms-office.vbaProject')]))
+
+
+XML_LIBRARY = ('MSXML2', '*\\G{F5078F18-C551-11D3-89B9-0000F81FE221}#6.0#0#C:\\inert\\msxml6.dll#Microsoft XML, v6.0')
+OFFICE_LIBRARY = ('Office', '*\\G{2DF8D04C-5BFA-101B-BDE5-00AA0044DE52}#2.0#0#C:\\inert\\MSO.DLL#Microsoft Office Object Library')
+
+# Each file and what makes it a case. vba.test.ts says what office-defuse makes of each with a script plugin.
+VBA_FIXTURES = [
+    # A workbook whose modules only fill and add up cells, with a button that runs one of them.
+    ('safe.xlsm', lambda: macro_xlsm(vba_bin([VBA_WORKBOOK, VBA_TOTALS], [OFFICE_LIBRARY]), vml_macro='[0]!SumColumn')),
+    # The same, with a module that starts a program, and a button that runs a macro of another workbook.
+    ('shell.xlsm', lambda: macro_xlsm(vba_bin([VBA_WORKBOOK, VBA_SHELL]), vml_macro="'C:\\inert\\other.xlsm'!SumColumn")),
+    # A module whose p-code says something its source does not, as VBA stomping writes it.
+    ('stomped.docm', lambda: macro_docm(vba_bin([VbaModule('ThisDocument', 'document', 'Public Sub Greet()\r\n    MsgBox "Hello"\r\nEnd Sub\r\n',
+                                                          pcode=b'\x01\x16\x03\x00p-code that is not the source: inert-program.exe')]))),
+    # A module whose compressed source has a copy token that reaches before its chunk.
+    ('unreadable.docm', lambda: macro_docm(vba_bin([VBA_DOCUMENT], source_of=lambda m: b'\x01\x10\xb0\x01\x41\xff\xff' + b'inert'))),
+    # A user form of Forms 2.0 controls, and one whose class table names the WebBrowser control.
+    ('form.xlsm', lambda: macro_xlsm(vba_bin([VBA_TOTALS, VBA_FORM]))),
+    ('form-activex.xlsm', lambda: macro_xlsm(cfb([s if not (isinstance(s, Storage) and s.name == 'PickForm') else form_designer('PickForm', '8856F961-340A-11D0-A96B-00C04FD705A2')
+                                                  for s in vba_storages([VBA_TOTALS, VBA_FORM])]))),
+    # A project that refers to Microsoft XML, whose objects fetch URLs, with harmless code.
+    ('reference.xlsm', lambda: macro_xlsm(vba_bin([VBA_TOTALS], [OFFICE_LIBRARY, XML_LIBRARY]))),
+    # Compound files: a Word document with its project in Macros, and a workbook with its project in _VBA_PROJECT_CUR.
+    ('safe.doc', lambda: word_doc('Inert text.\r', extra=[Storage('Macros', vba_storages([VBA_DOCUMENT]))])),
+    ('safe.xls', lambda: xls([('Sheet1', 0, 0x10)], extra=[Storage('_VBA_PROJECT_CUR', vba_storages([VBA_WORKBOOK, VBA_TOTALS]))])),
+]
+
+
+def vba_fixtures():
+    """Writes test/fixtures/vba. Needs nothing but Python."""
+    folder = os.path.join(OUT, 'vba')
+    shutil.rmtree(folder, ignore_errors=True)
+    os.makedirs(folder)
+    for name, build in VBA_FIXTURES:
+        with open(os.path.join(folder, name), 'wb') as f:
+            f.write(build())
+
+
 CASES = [
     # Fixed: packages office-defuse failed to read or misjudged.
     ('descriptor-empty-entry.ods', case_descriptor_empty_entry),
@@ -2850,6 +3013,7 @@ def main():
                 for name in sorted(os.listdir(os.path.join(OUT, sub))):
                     fixed_times(os.path.join(OUT, sub, name))
         cases()
+        vba_fixtures()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
     count = sum(len(files) for _, _, files in os.walk(OUT))

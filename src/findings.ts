@@ -83,6 +83,10 @@ def(C.Encrypted, D.XorObfuscation, 'info', 0, 'Encryption is XOR obfuscation');
 def(C.Encrypted, D.UnsupportedAlgorithm, 'reject', 0, 'The file is encrypted with an algorithm office-defuse does not decrypt<: {algorithm}|>');
 // MACRO
 def(C.Macro, D.VbaProject, 'strip', 70, 'The document holds VBA macros');
+def(C.Macro, D.CompiledCode, 'strip', 10, "The VBA project's compiled code was removed, so Office compiles the source the plugins checked");
+def(C.Macro, D.PluginPassed, 'info', 30, 'A VBA module was kept by <plugin {plugin}|a plugin>');
+def(C.Macro, D.PluginRemoved, 'strip', 0, '<Plugin {plugin}|A plugin> did not keep a VBA module, so the VBA project was removed');
+def(C.Macro, D.PluginFailed, 'strip', 0, '<Plugin {plugin}|A plugin> failed on a VBA module, so the VBA project was removed');
 def(C.Macro, D.XlmMacrosheet, 'strip', 70, 'The workbook holds an Excel 4.0 macro sheet');
 def(C.Macro, D.WordBasic, 'strip', 70, 'The Word 6.0 or 95 document holds WordBasic macros, which Word runs as VBA');
 def(C.Macro, D.OdfBasic, 'strip', 70, 'The document holds Basic macros');

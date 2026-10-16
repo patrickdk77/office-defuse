@@ -1,4 +1,4 @@
-import { clip, type RunContext } from './context';
+import { clip, ownMacro, type RunContext } from './context';
 import { fieldWords } from './formulas';
 import { isFragment } from './links';
 import type { FieldMarks } from './plan';
@@ -25,7 +25,7 @@ export function evaluateField(ctx: RunContext, location: string, code: string, c
   const switchAt = words.findIndex(w => !w.quoted && w.text.startsWith('\\'));
   const arg = (n: number) => (words[n] !== undefined && (switchAt < 0 || n < switchAt) ? words[n].text : undefined);
   if (name === 'DDE' || name === 'DDEAUTO') actions.push(ctx.report(C.Dde, D.Field, location, data).action);
-  else if (name === 'MACROBUTTON') actions.push(ctx.report(C.Field, D.Macrobutton, location, { ...data, macro: clip(words[1]?.text ?? '') }).action);
+  else if (name === 'MACROBUTTON') actions.push(ctx.report(C.Field, D.Macrobutton, location, { ...data, macro: clip(words[1]?.text ?? '') }, ownMacro(ctx.run, words[1]?.text ?? '')).action);
   else if (name === 'INCLUDETEXT' || name === 'INCLUDEPICTURE' || name === 'IMPORT' || name === 'LINK') {
     const target = arg(name === 'LINK' ? 2 : 1);
     if (target === undefined) actions.push(ctx.report(C.External, D.Include, location, data).action);

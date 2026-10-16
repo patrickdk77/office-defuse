@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.3 - 2026-10-16
+
+- `scriptPlugins` shows each module of a VBA project to script plugins, such as script-defuse's `formScriptPlugin`. A project whose modules all pass stays, written without its compiled code, so Office compiles the source the plugins read and stomped p-code never reaches the output. The `vbaProject.bin` of an OOXML package and the project storages of a compound file go to the plugins. A project inside an embedded object or a PowerPoint 97 presentation goes as before.
+- New findings: MACRO/PLUGIN_PASSED, MACRO/PLUGIN_REMOVED, MACRO/PLUGIN_FAILED and MACRO/COMPILED_CODE.
+- A kept project keeps its user forms when they hold Forms 2.0 controls only. A form whose class table could name another ActiveX control gets CONTROL/ACTIVEX, and the project goes.
+- An Excel shape, form control, ribbon callback, PowerPoint action or MACROBUTTON field that runs one of a kept project's macros by name stays, and its finding is `info`.
+- The output check matches a kept project by its sources, and fails when the output still holds p-code.
+- The VBA reader takes a chunk header without its signature bits, and a few bytes of padding after the last chunk. Office opens files written that way, and the output holds neither, since a kept module is compressed again.
+
 ## 0.2.2 - 2026-10-16
 
 - An add-in's empty presentation part is read and written as it is. PowerPoint writes every `.ppam` that way, since an add-in has no slides, and 0.2.1 rejected each one as XML/MALFORMED. An empty main part in any other format is still rejected.

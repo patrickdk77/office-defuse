@@ -4,6 +4,7 @@ import { type ContainedDecision, decideContained, presence, spillOf } from './co
 import { clip, type Reported, type RunContext } from './context';
 import { StopError } from './errors';
 import { rangeChunks, readAll, SpillSink } from './io';
+import { decideVba } from './macros';
 import { type PackagedFile, parseCompObj, parseOleStream, parsePackage, replaceSized, sizedStream } from './oleobj';
 import type { CompoundPlan } from './plan';
 import { subtree } from './rewrite-cfb';
@@ -41,23 +42,24 @@ const at = (prefix: string, e: CfbEntry) => [prefix, entryPath(e)].filter(Boolea
  */
 export async function compoundRules(ctx: RunContext, cfb: CompoundFile, prefix: string, rootIsObject: boolean, plan?: CompoundPlan, rootDecision?: ContainedDecision): Promise<void> {
   const projects = new Set<CfbEntry>();
+  /** Storages of embedded objects, whose contents the plugins that take the object decide. */
+  const objects = new Set<CfbEntry>();
+  const inObject = (e: CfbEntry) => {
+    for (let p = e.parent; p; p = p.parent) if (objects.has(p)) return true;
+    return false;
+  };
+  /** User form designers of a VBA project that stays, which go with the project rather than as objects. */
+  const designers = new Set<CfbEntry>();
+  const inDesigner = (e: CfbEntry) => {
+    for (let p: CfbEntry | undefined = e; p; p = p.parent) if (designers.has(p)) return true;
+    return false;
+  };
   const drop = (r: Reported, e: CfbEntry) => {
     if (r.action === 'strip' && e.kind !== 'root') plan?.drop.add(e);
   };
   for (const e of cfb.entries) {
-    if (e.kind === 'stream') continue;
+    if (e.kind === 'stream' || inDesigner(e)) continue;
     const child = (name: string) => e.children.find(c => upper(c) === name);
-    // A VBA project: a VBA storage with a dir stream, which names the modules (MS-OVBA 2.2). The storage that holds
-    // the project goes, or the VBA storage when that is the root.
-    const vba = child('VBA');
-    if (vba?.kind === 'storage' && vba.children.some(c => c.kind === 'stream' && upper(c) === 'DIR')) {
-      projects.add(e);
-      drop(ctx.report(C.Macro, D.VbaProject, at(prefix, vba), { storage: at(prefix, vba) }), e.kind === 'root' ? vba : e);
-    }
-    if (e.kind === 'storage' && (upper(e) === '_VBA_PROJECT_CUR' || upper(e) === 'MACROS') && e.children.length && !projects.has(e)) {
-      // Excel's and Word's project storages, without the dir stream a whole project has.
-      drop(ctx.report(C.Macro, D.VbaProject, at(prefix, e), { storage: at(prefix, e) }), e);
-    }
     const names = new Set(e.children.map(upper));
     const parent = e.parent ? upper(e.parent) : '';
     const isObject =
@@ -66,6 +68,23 @@ export async function compoundRules(ctx: RunContext, cfb: CompoundFile, prefix: 
         : [...names].some(n => OBJECT_STREAMS.has(n) || CONTROL_STREAMS.has(n)) ||
           (parent === 'OBJECTPOOL' && e.parent?.parent?.kind === 'root') ||
           (e.parent?.kind === 'root' && /^MBD[0-9A-F]{8}$/i.test(e.name));
+    if (isObject) objects.add(e);
+    // A VBA project: a VBA storage with a dir stream, which names the modules (MS-OVBA 2.2). The storage that holds
+    // the project goes, or the VBA storage when that is the root. With script plugins, the project stays when they
+    // pass every module and the rewrite can take out its compiled code: in the file the rewrite writes, and outside any
+    // embedded object, whose plugins decide what it holds.
+    const vba = child('VBA');
+    if (vba?.kind === 'storage' && vba.children.some(c => c.kind === 'stream' && upper(c) === 'DIR')) {
+      projects.add(e);
+      const decision = plan && !objects.has(e) && !inObject(e) ? await decideVba(ctx, cfb, vba, at(prefix, vba), plan) : undefined;
+      const data = { storage: at(prefix, vba), ...(decision?.reason ? { reason: decision.reason } : {}) };
+      if (decision?.keep) for (const d of decision.designers ?? []) designers.add(d);
+      drop(ctx.report(C.Macro, D.VbaProject, at(prefix, vba), data, decision?.keep ? 'info' : undefined), e.kind === 'root' ? vba : e);
+    }
+    if (e.kind === 'storage' && (upper(e) === '_VBA_PROJECT_CUR' || upper(e) === 'MACROS') && e.children.length && !projects.has(e)) {
+      // Excel's and Word's project storages, without the dir stream a whole project has.
+      drop(ctx.report(C.Macro, D.VbaProject, at(prefix, e), { storage: at(prefix, e) }), e);
+    }
     if (isObject) for (const r of await objectRules(ctx, cfb, e, at(prefix, e), plan, e.kind === 'root' ? rootDecision : undefined)) drop(r, e);
   }
 }

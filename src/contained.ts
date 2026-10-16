@@ -31,7 +31,7 @@ export interface InnerFile {
  * Throws on an error a plugin threw that stops the whole tree. An I/O error fails this run as one of its own would,
  * so its cause goes up.
  */
-function passOn(run: RunState, e: unknown): void {
+export function passOn(run: RunState, e: unknown): void {
   const code = stopsTree(e);
   if (code === 'DEFUSE_IO') {
     const cause = (e as { cause?: unknown }).cause ?? e;

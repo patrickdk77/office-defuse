@@ -86,6 +86,7 @@ export enum OfficeDetail {
   XorObfuscation = 'XOR_OBFUSCATION',
   // MACRO
   VbaProject = 'VBA_PROJECT',
+  CompiledCode = 'COMPILED_CODE',
   XlmMacrosheet = 'XLM_MACROSHEET',
   WordBasic = 'WORDBASIC',
   OdfBasic = 'ODF_BASIC',
@@ -325,6 +326,40 @@ export interface ContainedFilePlugin {
   process(file: ContainedFile, sink: ByteSink, context: PluginContext): Promise<'scrubbed' | 'passed' | 'removed' | ContainedFileResult>;
 }
 
+/** A type library or project a VBA project refers to, as its dir stream lists it. */
+export interface VbaReferenceInfo {
+  name: string;
+  kind: 'registered' | 'control' | 'project';
+  /** A type library's LibidReference, such as `*\G{...}#2.0#0#path#description`, or a project's path. */
+  libid: string;
+}
+
+/** A VBA module, as office-defuse shows it to a script plugin. */
+export interface ContainedScript {
+  /** The module's source, decoded with the project's code page. */
+  text: string;
+  /** "vba-" and the module's kind: "vba-document", "vba-standard", "vba-class" or "vba-form". */
+  trigger: string;
+  location: string;
+  /** The module's name. */
+  fieldName: string;
+  language: 'vba';
+  form: 'office';
+  /** The references of the module's project. office-defuse gives them with the project's first module only. */
+  references?: VbaReferenceInfo[];
+}
+
+export interface ScriptPlugin {
+  kind: 'script';
+  name: string;
+  accepts(script: ContainedScript): boolean | Promise<boolean>;
+  /**
+   * 'passed' keeps the module. Anything else removes the VBA project, since office-defuse writes no module a plugin
+   * rewrote. `findings` go into the report at the module's location.
+   */
+  process(script: ContainedScript): Promise<{ result: 'scrubbed' | 'passed' | 'removed'; text?: string; findings?: DefuseFinding[] }>;
+}
+
 export interface OfficeActionOverride {
   category: OfficeCategory;
   detail?: OfficeDetail;
@@ -358,6 +393,12 @@ export interface OfficeOptions {
   scoreBands?: OfficeScoreBands;
   /** Plugins that decide about the files inside the file: embedded objects and packages, OLE parts and attachments. */
   filePlugins?: ContainedFilePlugin[];
+  /**
+   * Plugins that decide about each module of a VBA project in a compound file or an OOXML package. The first plugin that
+   * accepts a module decides it. The project stays when every module passed, written without its compiled code so
+   * Office compiles the source the plugins read. Otherwise it goes, as it does without plugins.
+   */
+  scriptPlugins?: ScriptPlugin[];
   /** Directory for temporary files. Defaults to os.tmpdir(). */
   tempDir?: string;
   /**

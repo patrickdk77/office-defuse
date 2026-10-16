@@ -387,6 +387,8 @@ export async function disarmAtDepth(
     }
     // The output is checked with the caller's overrides and limits, and the plugins' verdicts in place of the plugins.
     const verifyOptions: OfficeOptions = {
+      // No plugin is asked again. An empty list still reads VBA project parts the way the upload's run did.
+      scriptPlugins: options.scriptPlugins && [],
       actionOverrides: options.actionOverrides,
       scoreWeights: options.scoreWeights,
       scoreBands: options.scoreBands,
