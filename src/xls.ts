@@ -1,6 +1,6 @@
 import { autoName, type BiffRecord, objSubrecords, parseBoundSheet, parseLbl, R, RecordReader, type Sheet, xlString } from './biff';
 import type { CfbEntry, CompoundFile } from './cfb';
-import { clip, ownMacro, type Reported, type RunContext } from './context';
+import { clip, type Reported, type RunContext } from './context';
 import { StopError } from './errors';
 import { type BiffNameRef, biffCalls } from './formulas';
 import { SpillSink } from './io';
@@ -234,7 +234,7 @@ async function sheetRules(
       // A shape that runs one of the workbook's own macros stays when its VBA project does.
       const name = macro.ref && ownName ? ownName(macro.ref) : undefined;
       const data = { sheet: clip(s.name), ...(macro.ref && nameOf ? { macro: clip(nameOf(macro.ref) ?? '') } : {}) };
-      if (ctx.report(C.Macro, D.Link, location, data, name === undefined ? undefined : ownMacro(ctx.run, name)).action === 'strip') edits.objMacros.add(r.offset);
+      if (ctx.macroTrigger(C.Macro, D.Link, location, data, name).action === 'strip') edits.objMacros.add(r.offset);
     } else if (r.type === R.hlink) {
       const target = hyperlink(decrypt(r));
       if (target.trim() && !isFragment(target) && ctx.link(target, location, { sheet: clip(s.name), source: 'HLink record' }).action === 'strip') edits.hyperlinks.add(r.offset);

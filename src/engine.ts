@@ -66,21 +66,20 @@ const xmlLimitsOf = (limits: Limits): XmlLimits => ({
   entitySize: limits.xmlEntitySize,
 });
 
-const PLUGIN_KEPT = new Set<string>([D.PluginPassed, D.PluginScrubbed]);
-
 /**
  * `incomplete` marks a run that stopped before it read the whole package. It is rejected without a score, whatever
  * the actions say, because an override can make the finding that stopped it look harmless. In the check of an output,
  * `isOutput`, the files plugins kept count in the score; in an upload they do not, and a file a plugin cleaned makes
  * the upload strippable, since the output must be written.
  */
-function finish(findings: DefuseFinding[], options: OfficeOptions, incomplete: boolean, format?: Format, isOutput = false, superseded?: WeakSet<DefuseFinding>): OfficeInspection {
+function finish(findings: DefuseFinding[], options: OfficeOptions, incomplete: boolean, format?: Format, isOutput = false): OfficeInspection {
   const named = { format: format?.format ?? '', mimeType: format?.mimeType ?? '' };
   if (incomplete) return { status: 'rejected', score: null, risk: OfficeRisk.Unknown, findings, ...named };
   const rejected = findings.some(f => f.action === 'reject');
   const strippable = findings.some(f => f.action === 'strip' || (!isOutput && f.detail === D.PluginScrubbed));
-  const scored = findings.filter(f => !superseded?.has(f) && (isOutput || !PLUGIN_KEPT.has(f.detail)));
-  const { score, risk } = scoreFindings(scored, options);
+  // What a plugin decided counts at the weights of the plugin's own findings; the PLUGIN_* findings that record its
+  // answer weigh nothing.
+  const { score, risk } = scoreFindings(findings, options);
   return { status: rejected ? 'rejected' : strippable ? 'strippable' : 'clean', score, risk, findings, ...named };
 }
 
@@ -172,7 +171,6 @@ export function newRun(options: OfficeOptions, depth: number, deadline: number |
     verify,
     kept: new Map(),
     held: [],
-    superseded: new WeakSet(),
     sources: [],
   };
 }
@@ -242,7 +240,7 @@ async function analyze(run: RunState, source: ByteSource): Promise<OfficeInspect
     }
     findings.push(...ctx.findings);
     if (run.temp.ioError !== undefined) throw run.temp.ioError;
-    return finish(findings, options, false, ctx.format, isOutput, run.superseded);
+    return finish(findings, options, false, ctx.format, isOutput);
   } catch (e) {
     if (src.failure !== undefined) throw src.failure;
     if (run.temp.ioError !== undefined) throw run.temp.ioError;

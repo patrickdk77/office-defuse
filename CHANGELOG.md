@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0 - 2026-10-17
+
+- A plugin's answer is final. A file a plugin passed, scrubbed or removed gets none of office-defuse's own findings, such as EMBEDDED/PACKAGE, EMBEDDED/OLE_OBJECT, EMBEDDED/EQUATION or MACRO/VBA_PROJECT, and office-defuse no longer looks inside it for VBA projects and objects. 0.2.4 reported those findings next to the plugin's, scored a removed file at office-defuse's weight, and removed an Equation Editor object a plugin passed.
+- A VBA project whose modules the script plugins all passed or removed is reported by MACRO/PLUGIN_PASSED and PLUGIN_REMOVED and their findings, without MACRO/VBA_PROJECT. A project the plugins removed scored 70 for MACRO/VBA_PROJECT on top of what they found.
+- A button, shape, callback, field or action that runs a macro of a project the plugins answered for weighs 0, kept or removed, in the run's score and in the weights a container gets through `officePlugin`. A container counted the kept ones at 50 before, and a removed one counted in every score.
+- MACRO/PLUGIN_PASSED and EMBEDDED/PLUGIN_PASSED and PLUGIN_SCRUBBED weigh 0, in the upload's score and the output's. The output's score counted them before.
+
 ## 0.2.4 - 2026-10-16
 
 - Forms 2.0 controls stay: CommandButton, Label, TextBox, ListBox, ComboBox, CheckBox, OptionButton, ToggleButton, SpinButton and ScrollBar, when their persisted properties read as Office writes them and hold no picture. The new CONTROL/FORMS_CONTROL, `info`, reports each. It covers OOXML activeX parts persisted as a stream, a storage or a property bag, Word's control storages and Excel's `Ctls` stream. Every other control is CONTROL/ACTIVEX as before, now with `data.reason`.

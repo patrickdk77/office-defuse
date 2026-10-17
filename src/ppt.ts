@@ -1,7 +1,7 @@
 import * as zlib from 'node:zlib';
 import { type CfbEntry, CompoundFile } from './cfb';
 import { decideContained, spillOf } from './contained';
-import { clip, ownMacro, type Reported, type RunContext } from './context';
+import { clip, type Reported, type RunContext } from './context';
 import { checkTime, StopError } from './errors';
 import { controlStorageProblem, OOXML_CONTROL_STREAMS } from './forms';
 import { bufferSink, bufferSource, chunksOf, Reader, readAll, SpillSink } from './io';
@@ -290,7 +290,8 @@ async function storageRules(ctx: RunContext, source: ByteSource, s: Storage, rol
   // An object's storage goes to the plugins as the compound file it is, and stays as they leave it.
   const size = await inner.size();
   const decision = await decideContained(ctx, { location, chunks: () => chunksOf(inner, size) });
-  await compoundRules(ctx, cfb, location, true, undefined, decision);
+  // A plugin's answer is final, so the object's own rules do not run.
+  if (!decision?.answered) await compoundRules(ctx, cfb, location, true, undefined, decision);
   if ((decision && !decision.keep) || ctx.strips > strips) return 'remove';
   if (decision?.replacement) {
     const bytes = await readAll(decision.replacement);
@@ -352,7 +353,7 @@ async function containerRules(
     let r: Reported | undefined;
     if (action === 2) r = ctx.report(C.Action, D.RunProgram, location, data);
     // A macro of a VBA project that stays keeps its action.
-    else if (action === 1) r = ctx.report(C.Macro, D.Link, location, data, ownMacro(ctx.run, name));
+    else if (action === 1) r = ctx.macroTrigger(C.Macro, D.Link, location, data, name);
     else if (action === 5) r = ctx.report(C.Action, D.OleVerb, location, data);
     if (r?.action === 'strip') {
       body[8] = 0;

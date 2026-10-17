@@ -119,7 +119,8 @@ describe('flat OpenDocument', () => {
     const r = await disarmOffice(input);
     expect([r.status, kinds(r.before), text(r.bytes).includes('object-ole'), text(r.bytes).includes('draw:image')]).to.deep.equal(['defused', ['EMBEDDED/OLE_OBJECT'], false, true]);
     const kept = await inspectOffice(input, { filePlugins: [recorder('passed').plugin] });
-    expect(of(kept, 'EMBEDDED/OLE_OBJECT').map(f => f.action)).to.deep.equal(['info']);
+    // The plugin passes the object and its picture.
+    expect([of(kept, 'EMBEDDED/OLE_OBJECT').length, of(kept, 'EMBEDDED/PLUGIN_PASSED').length]).to.deep.equal([0, 2]);
   });
 
   it('writes out internal entities when the internal subset goes', async () => {

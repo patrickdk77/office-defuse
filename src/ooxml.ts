@@ -1,7 +1,7 @@
 import { autoName } from './biff';
 import { CompoundFile, guid } from './cfb';
-import { type ContainedDecision, decideContained, presence } from './contained';
-import { clip, ownMacro, type Reported, type ZipContext } from './context';
+import { type ContainedDecision, decideContained, ownFinding } from './contained';
+import { clip, type Reported, type ZipContext } from './context';
 import { StopError } from './errors';
 import { FieldStack } from './fields';
 import { type Format, OOXML_FORMATS, XPS_FORMATS, XPS_SEQUENCE } from './formats';
@@ -411,7 +411,7 @@ class PartRules implements XmlHandler {
       for (const a of el.attributes) {
         if (a.ns !== '' || !a.value.trim() || !/^(on[A-Z]|get[A-Z]|loadImage$)/.test(a.local)) continue;
         // The callback goes and the control stays, doing nothing, unless it calls a macro of a project that stays.
-        if (this.ctx.report(C.Ui, D.Callback, this.part, { callback: `${a.local}=${clip(a.value)}` }, ownMacro(this.ctx.run, a.value)).action === 'strip') {
+        if (this.ctx.macroTrigger(C.Ui, D.Callback, this.part, { callback: `${a.local}=${clip(a.value)}` }, a.value).action === 'strip') {
           this.ctx.plan.element(this.part, el.index, { strip: new Set([attributeKey('', a.local)]) });
         }
       }
@@ -435,7 +435,7 @@ class PartRules implements XmlHandler {
     } else if (XDR_NS.has(ns)) {
       const macro = attr(el, '', 'macro');
       // The shape stays, and clicking it runs nothing.
-      if (macro?.trim() && this.ctx.report(C.Macro, D.Link, this.part, { macro: clip(macro) }, ownMacro(this.ctx.run, macro)).action === 'strip') {
+      if (macro?.trim() && this.ctx.macroTrigger(C.Macro, D.Link, this.part, { macro: clip(macro) }, macro).action === 'strip') {
         this.ctx.plan.element(this.part, el.index, { strip: new Set([attributeKey('', 'macro')]) });
       }
     } else if (ns === VML_EXCEL_NS && el.local === 'FmlaMacro') this.macroText = { shown: new Shown(), index: el.index };
@@ -483,7 +483,7 @@ class PartRules implements XmlHandler {
     }
     if (ns === VML_EXCEL_NS && el.local === 'FmlaMacro' && this.macroText) {
       const macro = this.macroText.shown.text.trim();
-      if (this.macroText.shown.content) this.remove(this.ctx.report(C.Macro, D.Link, this.part, { macro: clip(macro) }, ownMacro(this.ctx.run, macro)), this.macroText);
+      if (this.macroText.shown.content) this.remove(this.ctx.macroTrigger(C.Macro, D.Link, this.part, { macro: clip(macro) }, macro), this.macroText);
       this.macroText = undefined;
     }
     if (this.hyperlinkBase && EXTENDED_NS.has(ns) && el.local === 'HyperlinkBase') {
@@ -519,7 +519,7 @@ class PartRules implements XmlHandler {
     if (action.startsWith('ppaction://program')) this.remove(this.ctx.report(C.Action, D.RunProgram, this.part, data), el);
     else if (action.startsWith('ppaction://macro')) {
       const name = /[?&]name=([^&]*)/i.exec(written)?.[1] ?? '';
-      this.remove(this.ctx.report(C.Macro, D.Link, this.part, data, ownMacro(this.ctx.run, safeDecode(name))), el);
+      this.remove(this.ctx.macroTrigger(C.Macro, D.Link, this.part, data, safeDecode(name)), el);
     } else if (action.startsWith('ppaction://ole')) this.remove(this.ctx.report(C.Action, D.OleVerb, this.part, data), el);
   }
 
@@ -740,19 +740,19 @@ async function partRules(ctx: ZipContext, p: Part): Promise<void> {
   // With script plugins, a VBA project part is read here, so its modules go to them, rather than to the file plugins.
   const vbaDecision = p.vba ?? (vba && ctx.run.options.scriptPlugins !== undefined ? await vbaPart(ctx, p.entry, loc) : undefined);
   const decision = vbaDecision ?? (contained ? await decideContained(ctx, { name: loc, declaredType: ct || undefined, location: loc, chunks: () => ctx.zip.read(p.entry) }) : undefined);
-  const act = presence(decision);
   const found: Reported[] = [];
-  if (vba && !vbaDecision) found.push(ctx.report(C.Macro, D.VbaProject, loc, data, act));
+  // A plugin's answer is final, so a file it answered for gets none of office-defuse's own findings.
+  if (vba && !vbaDecision) found.push(ownFinding(ctx, decision, C.Macro, D.VbaProject, loc, data));
   // A macro sheet becomes an empty worksheet, so the indexes of the sheets after it stay right.
   if ((TYPE.macrosheet.has(ct) || as(AS.macrosheet)) && ctx.report(C.Macro, D.XlmMacrosheet, loc, data).action === 'strip') ctx.plan.sheets.add(key);
-  if (ole) found.push(ctx.report(C.Embedded, D.OleObject, loc, data, act));
-  if (pkg) found.push(ctx.report(C.Embedded, D.Package, loc, data, act));
+  if (ole) found.push(ownFinding(ctx, decision, C.Embedded, D.OleObject, loc, data));
+  if (pkg) found.push(ownFinding(ctx, decision, C.Embedded, D.Package, loc, data));
   if (control && p.forms && !p.forms.problem) found.push(ctx.report(C.Control, D.FormsControl, loc, { ...data, clsid: p.forms.classId ?? '' }));
   else if (control || (controlBinary && !p.claimed)) {
     const why = control && p.forms ? { ...(p.forms.classId ? { clsid: p.forms.classId } : {}), ...(p.forms.problem ? { reason: clip(p.forms.problem) } : {}) } : {};
-    found.push(ctx.report(C.Control, D.ActiveX, loc, { ...data, ...why }, control ? undefined : act));
+    found.push(control ? ctx.report(C.Control, D.ActiveX, loc, { ...data, ...why }) : ownFinding(ctx, decision, C.Control, D.ActiveX, loc, { ...data, ...why }));
   }
-  if (p.ole && !vba && !ole && !control && !controlBinary && !pkg) found.push(ctx.report(C.Embedded, D.OleFile, loc, data, act));
+  if (p.ole && !vba && !ole && !control && !controlBinary && !pkg) found.push(ownFinding(ctx, decision, C.Embedded, D.OleFile, loc, data));
   if (decision ? !decision.keep : found.some(f => f.action === 'strip')) ctx.plan.drop.add(key);
   else if (decision?.replacement) ctx.plan.replace.set(key, decision.replacement);
 }

@@ -1,4 +1,4 @@
-import { decideContained, presence } from './contained';
+import { type ContainedDecision, decideContained, ownFinding } from './contained';
 import { clip, type PlanContext, type Reported, type ZipContext } from './context';
 import { StopError } from './errors';
 import { type Format, ODF_FORMATS } from './formats';
@@ -342,17 +342,17 @@ export async function inspectOdf(ctx: ZipContext): Promise<void> {
   // A folder goes whole, its empty files with it.
   for (const [prefix, f] of folders) if (ctx.report(f.category, f.detail, prefix, { entries: f.entries }).action === 'strip') plan.folders.add(`${nameKey(prefix)}/`);
   // OLE entries go to the plugins. When none takes one, the elements that refer to it decide, or EMBEDDED/OLE_FILE.
-  const decided = new Map<string, boolean>();
+  const decided = new Map<string, ContainedDecision>();
   for (const e of oleEntries) {
     const key = nameKey(e.name);
     const decision = await decideContained(ctx, { name: e.name, location: e.name, chunks: () => zip.read(e) });
     if (decision) {
-      decided.set(key, decision.keep);
+      decided.set(key, decision);
       if (!decision.keep) plan.drop.add(key);
       else if (decision.replacement) plan.replace.set(key, decision.replacement);
     }
     if (!oleRefs.get(key)) {
-      const r = ctx.report(C.Embedded, D.OleFile, e.name, { part: e.name }, presence(decision));
+      const r = ownFinding(ctx, decision, C.Embedded, D.OleFile, e.name, { part: e.name });
       if (!decision && r.action === 'strip') plan.drop.add(key);
     }
   }
@@ -364,15 +364,12 @@ export async function inspectOdf(ctx: ZipContext): Promise<void> {
   }
   const files = new Set(zip.entries.filter(e => !e.directory).map(e => nameKey(e.name)));
   for (const o of plan.objects) {
-    const kept = decided.get(o.target);
-    if (kept === true) {
-      // A plugin kept the object's file, so the object stays.
-      if (o.finding) {
-        o.finding.action = 'info';
-        ctx.run.superseded.add(o.finding);
-      }
-      continue;
-    }
+    const decision = decided.get(o.target);
+    // A plugin's answer on the object's file is final, so the object's own finding is taken back.
+    if (decision?.answered) ctx.retract(o.finding);
+    const kept = decision?.keep;
+    // A plugin kept the object's file, so the object stays.
+    if (kept === true) continue;
     if (kept === false || o.strips) {
       plan.element(o.part, o.index, { remove: true });
       if (files.has(o.target)) plan.drop.add(o.target);

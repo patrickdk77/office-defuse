@@ -294,12 +294,9 @@ async function decideBinaries(ctx: PlanContext, odf: FlatOdf): Promise<void> {
     const object = plan.objects.find(o => o.index === parent.index);
     if (object) {
       decided.add(parent.index);
-      if (decision?.keep) {
-        if (object.finding) {
-          object.finding.action = 'info';
-          ctx.run.superseded.add(object.finding);
-        }
-      } else if (decision || object.strips) plan.element(FLAT_ODF_PART, parent.index, { remove: true });
+      // A plugin's answer on the object's file is final, so the object's own finding is taken back.
+      if (decision?.answered) ctx.retract(object.finding);
+      if (!decision?.keep && (decision || object.strips)) plan.element(FLAT_ODF_PART, parent.index, { remove: true });
     } else if (decision && !decision.keep) plan.element(FLAT_ODF_PART, parent.index, { remove: true });
     if (decision?.keep && decision.replacement) plan.element(FLAT_ODF_PART, b.data.index, { content: await base64Of(decision.replacement) });
   }

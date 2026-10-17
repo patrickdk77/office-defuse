@@ -13,6 +13,11 @@ export interface VbaDecision {
   reason?: string;
   /** The designer storages of the project's user forms, which stay with it and get no object rules of their own. */
   designers?: CfbEntry[];
+  /**
+   * A plugin passed or removed every module, and the project stays or goes by those answers alone. They are final:
+   * the report holds them, and nothing of office-defuse's own about the project.
+   */
+  answered?: boolean;
 }
 
 /** Keys of the run's kept map for a VBA project, which never match the MD5 of a file. */
@@ -45,11 +50,13 @@ export async function decideVba(ctx: RunContext, cfb: CompoundFile, vba: CfbEntr
     if (!designers) return { keep: false };
     if (!(await isPurged(cfb, project))) ctx.removal(C.Macro, D.CompiledCode, location, { storage: location });
     run.macrosKept = true;
-    return { keep: true, designers };
+    run.macrosAnswered = true;
+    return { keep: true, designers, answered: true };
   }
   if (!plugins.length) return { keep: false };
   const start = ctx.findings.length;
   let keep = project.modules.length > 0;
+  let answered = keep;
   const used = new Set<string>();
   for (const [i, m] of project.modules.entries()) {
     const at = `${location}/${showName(m.stream.name)}`;
@@ -78,19 +85,27 @@ export async function decideVba(ctx: RunContext, cfb: CompoundFile, vba: CfbEntr
         if (r.result === 'passed') ctx.report(C.Macro, D.PluginPassed, at, data);
         else {
           keep = false;
+          if (r.result !== 'removed') answered = false;
           ctx.removal(C.Macro, D.PluginRemoved, at, data);
         }
         pushScript(ctx, r.findings);
       } catch (e) {
         passOn(run, e);
         keep = false;
+        answered = false;
         ctx.removal(C.Macro, D.PluginFailed, at, data);
       }
       break;
     }
-    if (!decided) keep = false;
+    if (!decided) {
+      keep = false;
+      answered = false;
+    }
   }
-  if (!keep) return { keep: false };
+  if (!keep) {
+    if (answered) run.macrosAnswered = true;
+    return { keep: false, answered };
+  }
   const passed: Expected = { result: 'passed', plugin: [...used].join(', '), findings: ctx.findings.slice(start).map(f => ({ ...f, data: f.data && { ...f.data } })) };
   const designers = await formDesigners(ctx, cfb, project, location);
   if (!designers) return { keep: false };
@@ -109,7 +124,8 @@ export async function decideVba(ctx: RunContext, cfb: CompoundFile, vba: CfbEntr
     ctx.removal(C.Macro, D.CompiledCode, location, { storage: location });
   }
   run.macrosKept = true;
-  return { keep: true, designers };
+  run.macrosAnswered = true;
+  return { keep: true, designers, answered: true };
 }
 
 /**

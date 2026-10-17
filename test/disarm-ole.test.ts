@@ -184,9 +184,11 @@ describe('disarm: compound files', () => {
     const seen = plugin('passed');
     const kept = await defused(fixture('ole', 'objects.doc'), { filePlugins: [seen] });
     expect(seen.seen.map(s => s.name)).to.deep.equal(['inert.txt', 'Microsoft Equation 3.0']);
-    // The Packager object stays. The Equation Editor object goes anyway, since EMBEDDED/EQUATION strips on its own.
-    expect((await paths(kept.bytes)).filter(p => /^ObjectPool\/_100[01]$/.test(p))).to.deep.equal(['ObjectPool/_1000']);
-    expect(of(kept.before, 'EMBEDDED/OLE_OBJECT').map(f => f.action)).to.deep.equal(['info', 'info']);
+    // The plugin passed both objects, and its answer is final, so both stay and office-defuse reports nothing of its own
+    // about them, not even that one is an Equation Editor object.
+    expect((await paths(kept.bytes)).filter(p => /^ObjectPool\/_100[01]$/.test(p))).to.deep.equal(['ObjectPool/_1000', 'ObjectPool/_1001']);
+    expect([...of(kept.before, 'EMBEDDED/OLE_OBJECT'), ...of(kept.before, 'EMBEDDED/EQUATION')]).to.deep.equal([]);
+    expect(of(kept.before, 'EMBEDDED/PLUGIN_PASSED').length).to.equal(2);
 
     const scrubbed = await defused(fixture('ole', 'objects.doc'), { filePlugins: [plugin('scrubbed', b => (b[0] === 0xd0 ? b : Buffer.from('cleaned')))] });
     const cfb = await open(scrubbed.bytes);
@@ -245,7 +247,7 @@ describe('disarm: RTF', () => {
     expect(text(r.bytes)).to.include('{{\\pict');
     expect(text(r.bytes)).to.not.include('objdata');
     const kept = await disarmOffice(fixture('rtf', 'package.rtf'), { filePlugins: [plugin('passed')] });
-    expect([kept.status, of(kept.before, 'EMBEDDED/OLE_OBJECT')[0]?.action]).to.deep.equal(['clean', 'info']);
+    expect([kept.status, of(kept.before, 'EMBEDDED/OLE_OBJECT').length, of(kept.before, 'EMBEDDED/PLUGIN_PASSED').length]).to.deep.equal(['clean', 0, 1]);
     expect(text(must(kept.bytes, 'output'))).to.include('\\objdata');
   });
 
@@ -254,7 +256,7 @@ describe('disarm: RTF', () => {
     const r = await defused(fixture('rtf', 'package.rtf'), { filePlugins: [p] });
     expect(p.seen.map(s => [s.name, s.bytes.toString()])).to.deep.equal([['inert.txt', 'inert marker']]);
     expect(text(r.bytes)).to.include(Buffer.from('cleaned file').toString('hex'));
-    expect(kinds(must(r.after, 'after'))).to.deep.equal(['EMBEDDED/PLUGIN_SCRUBBED', 'EMBEDDED/OLE_OBJECT']);
+    expect(kinds(must(r.after, 'after'))).to.deep.equal(['EMBEDDED/PLUGIN_SCRUBBED']);
     const again = await inspectOffice(r.bytes);
     expect(of(again, 'EMBEDDED/OLE_OBJECT')[0]?.data?.size).to.equal(12);
   });

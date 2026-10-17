@@ -1,5 +1,5 @@
 import { CFB_SIGNATURE, CompoundFile } from './cfb';
-import { type ContainedDecision, decideContained, presence } from './contained';
+import { type ContainedDecision, decideContained } from './contained';
 import { clip, type Reported, type RunContext } from './context';
 import { checkTime, StopError } from './errors';
 import { FieldStack } from './fields';
@@ -654,7 +654,8 @@ async function objectData(ctx: RunContext, o: RtfObject, bytes: Uint8Array | und
       cuts.push({ start: o.objdata[0], end: o.objdata[1], text: objdataGroup(replaceSized(bytes, ole1.dataAt, native.length, newNative)) });
     }
   }
-  const act = presence(decision);
+  // A plugin's answer is final, so the object's own rules do not run.
+  if (decision?.answered) return;
   if (pkg) Object.assign(data, packageData(pkg));
   else if (native && native.length >= 8 && CFB_SIGNATURE.every((v, i) => native[i] === v)) {
     let cfb: CompoundFile | undefined;
@@ -682,6 +683,6 @@ async function objectData(ctx: RunContext, o: RtfObject, bytes: Uint8Array | und
   // OLE2Link is the class of a linked object, CVE-2017-0199's. Its storage names the target, and when the storage does
   // not read, the class still says the object loads from outside.
   if (className.toLowerCase() === 'ole2link') ctx.report(C.External, D.Object, location, data);
-  else ctx.report(C.Embedded, D.OleObject, location, data, act);
+  else ctx.report(C.Embedded, D.OleObject, location, data);
   if (equation) ctx.report(C.Embedded, D.Equation, location, data);
 }

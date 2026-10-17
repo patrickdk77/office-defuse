@@ -114,7 +114,7 @@ describe('PowerPoint rewrite', () => {
   it('reads a PowerPoint 97 add-in as one, and keeps it one without its project', async () => {
     expect(await detectOffice(fixture('vba', 'addin.ppa'))).to.deep.include({ extension: 'ppa', mimeType: 'application/vnd.ms-powerpoint' });
     const kept = await disarmOffice(fixture('vba', 'addin.ppa'), { scriptPlugins: [passAll] });
-    expect([kept.status, must(kept.after, 'after').format, ...of(kept.before, 'MACRO/VBA_PROJECT').map(f => f.action)]).to.deep.equal(['defused', 'ppa', 'info']);
+    expect([kept.status, must(kept.after, 'after').format, of(kept.before, 'MACRO/VBA_PROJECT').length, of(kept.before, 'MACRO/PLUGIN_PASSED').length > 0]).to.deep.equal(['defused', 'ppa', 0, true]);
     const removed = await disarmOffice(fixture('vba', 'addin.ppa'));
     expect([removed.status, must(removed.after, 'after').format, ...of(removed.before, 'MACRO/VBA_PROJECT').map(f => f.action)]).to.deep.equal(['defused', 'ppa', 'strip']);
   });

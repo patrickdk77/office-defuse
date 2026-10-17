@@ -139,7 +139,8 @@ describe('script plugins', () => {
     ]);
     expect(r.status).to.equal('defused');
     expect(r.removed.map(f => `${f.category}/${f.detail}`)).to.deep.equal(['MACRO/COMPILED_CODE']);
-    expect(of(r.before, 'MACRO/VBA_PROJECT').map(f => f.action)).to.deep.equal(['info']);
+    // The plugins' answers are final, so office-defuse reports nothing of its own about the project.
+    expect(of(r.before, 'MACRO/VBA_PROJECT')).to.deep.equal([]);
     expect(of(r.before, 'MACRO/PLUGIN_PASSED').map(f => f.location)).to.deep.equal(['xl/vbaProject.bin > VBA/ThisWorkbook', 'xl/vbaProject.bin > VBA/Sums']);
     // The button runs a macro of the project, so it stays.
     expect(of(r.before, 'MACRO/LINK').map(f => f.action)).to.deep.equal(['info']);
@@ -152,8 +153,9 @@ describe('script plugins', () => {
   it('removes the project, and the button that runs another file, when a plugin removes a module', async () => {
     const r = await disarmed(vba('shell.xlsm'), scripts(/\bShell\b/));
     expect(r.status).to.equal('defused');
-    expect(kinds(r.before)).to.include.members(['MACRO/PLUGIN_PASSED', 'MACRO/PLUGIN_REMOVED', 'TEST/REFUSED', 'MACRO/VBA_PROJECT', 'MACRO/LINK']);
-    expect(of(r.before, 'MACRO/VBA_PROJECT').map(f => f.action)).to.deep.equal(['strip']);
+    expect(kinds(r.before)).to.include.members(['MACRO/PLUGIN_PASSED', 'MACRO/PLUGIN_REMOVED', 'TEST/REFUSED', 'MACRO/LINK']);
+    // The plugin's answer removed the project, so office-defuse reports nothing of its own about it.
+    expect(of(r.before, 'MACRO/VBA_PROJECT')).to.deep.equal([]);
     expect(of(r.before, 'MACRO/LINK').map(f => f.action)).to.deep.equal(['strip']);
     expect((await entryNames(r.bytes)).filter(n => /vba/i.test(n))).to.deep.equal([]);
     expect(await entryText(r.bytes, 'xl/drawings/vmlDrawing1.vml')).to.not.include('FmlaMacro');
@@ -216,9 +218,31 @@ describe('script plugins', () => {
     }
   });
 
+  it('scores a project the plugins answered for by their findings alone, and its own finding only when they did not', async () => {
+    const weighs = (weight: number): ScriptPlugin => ({
+      kind: 'script',
+      name: 'scorer',
+      accepts: () => true,
+      process: async s => ({
+        result: weight ? 'removed' : 'passed',
+        findings: [{ category: 'TEST', detail: weight ? 'REFUSED' : 'FORM', description: 'test', action: weight ? 'strip' : 'info', location: s.location, weight }],
+      }),
+    });
+    const kept = await disarmOffice(vba('safe.xlsm'), { scriptPlugins: [weighs(0)] });
+    const removed = await disarmOffice(vba('safe.xlsm'), { scriptPlugins: [weighs(35)] });
+    const failed = await disarmOffice(vba('safe.xlsm'), { scriptPlugins: [scripts(undefined, { throws: true })] });
+    const weightOf = (r: OfficeDisarmResult, kind: string) => r.before.findings.filter(f => `${f.category}/${f.detail}` === kind).length;
+    expect({
+      // The button that runs a kept macro weighs nothing either; the compiled code office-defuse removes itself does.
+      kept: [kept.before.risk, kept.before.score, weightOf(kept, 'MACRO/VBA_PROJECT'), must(kept.after, 'after').score],
+      removed: [removed.before.score, weightOf(removed, 'MACRO/VBA_PROJECT')],
+      failed: [failed.before.score, weightOf(failed, 'MACRO/VBA_PROJECT')],
+    }).to.deep.equal({ kept: ['LOW', 10, 0, 0], removed: [35, 0], failed: [83, 1] });
+  });
+
   it('decides in an inspection too, and leaves a project to the file plugins without script plugins', async () => {
     const inspected = await inspectOffice(vba('safe.xlsm'), { scriptPlugins: [scripts()] });
-    expect([inspected.status, ...of(inspected, 'MACRO/VBA_PROJECT').map(f => f.action)]).to.deep.equal(['strippable', 'info']);
+    expect([inspected.status, of(inspected, 'MACRO/VBA_PROJECT').length, of(inspected, 'MACRO/PLUGIN_PASSED').length]).to.deep.equal(['strippable', 0, 2]);
     const without = await inspectOffice(vba('safe.xlsm'));
     expect(of(without, 'MACRO/VBA_PROJECT').map(f => [f.location, f.action])).to.deep.equal([['xl/vbaProject.bin', 'strip']]);
   });

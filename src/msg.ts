@@ -1,5 +1,5 @@
 import { type CfbEntry, type CompoundFile, entryPath } from './cfb';
-import { decideContained, presence, pushContained, spillOf } from './contained';
+import { decideContained, ownFinding, pushContained, spillOf } from './contained';
 import { clip, type Reported, RunContext } from './context';
 import { StopError, stopsTree } from './errors';
 import { bufferSource, chunksOf, SpillSink } from './io';
@@ -226,7 +226,7 @@ async function attachment(
   const source = cfb.source(data);
   const decision = await decideContained(ctx, { ...file, chunks: () => chunksOf(source, data.size) });
   if (decision?.replacement) plan?.replace.set(data, decision.replacement);
-  const r = ctx.report(C.Embedded, D.Attachment, file.location, { ...info, size: data.size }, presence(decision));
+  const r = ownFinding(ctx, decision, C.Embedded, D.Attachment, file.location, { ...info, size: data.size });
   return decision && !decision.keep ? { ...r, action: 'strip' } : r;
 }
 

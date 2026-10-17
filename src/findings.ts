@@ -84,7 +84,7 @@ def(C.Encrypted, D.UnsupportedAlgorithm, 'reject', 0, 'The file is encrypted wit
 // MACRO
 def(C.Macro, D.VbaProject, 'strip', 70, 'The document holds VBA macros');
 def(C.Macro, D.CompiledCode, 'strip', 10, "The VBA project's compiled code was removed, so Office compiles the source the plugins checked");
-def(C.Macro, D.PluginPassed, 'info', 30, 'A VBA module was kept by <plugin {plugin}|a plugin>');
+def(C.Macro, D.PluginPassed, 'info', 0, 'A VBA module was kept by <plugin {plugin}|a plugin>');
 def(C.Macro, D.PluginRemoved, 'strip', 0, '<Plugin {plugin}|A plugin> did not keep a VBA module, so the VBA project was removed');
 def(C.Macro, D.PluginFailed, 'strip', 0, '<Plugin {plugin}|A plugin> failed on a VBA module, so the VBA project was removed');
 def(C.Macro, D.XlmMacrosheet, 'strip', 70, 'The workbook holds an Excel 4.0 macro sheet');
@@ -145,8 +145,8 @@ def(C.Embedded, D.Applet, 'strip', 60, 'An embedded Java applet');
 def(C.Embedded, D.Plugin, 'strip', 50, 'An embedded browser plug-in object');
 def(C.Embedded, D.Equation, 'strip', 70, 'An Equation Editor 3.0 object, which CVE-2017-11882 and CVE-2018-0802 exploit');
 def(C.Embedded, D.Attachment, 'strip', 30, '<An attached file "{name}"|An attached file> (<{type}|unknown type>)');
-def(C.Embedded, D.PluginPassed, 'info', 20, 'An embedded file was kept by <plugin {plugin}|a plugin> with nothing removed');
-def(C.Embedded, D.PluginScrubbed, 'info', 10, 'An embedded file was cleaned and kept by <plugin {plugin}|a plugin>');
+def(C.Embedded, D.PluginPassed, 'info', 0, 'An embedded file was kept by <plugin {plugin}|a plugin> with nothing removed');
+def(C.Embedded, D.PluginScrubbed, 'info', 0, 'An embedded file was cleaned and kept by <plugin {plugin}|a plugin>');
 def(C.Embedded, D.PluginFailed, 'strip', 0, '<Plugin {plugin}|A plugin> failed, so the embedded file was removed');
 def(C.Embedded, D.PluginRemoved, 'strip', 0, 'An embedded file was removed by <plugin {plugin}|a plugin>');
 // CONTROL

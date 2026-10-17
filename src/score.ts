@@ -3,6 +3,17 @@ import { OfficeCategory as C, OfficeDetail as D, type DefuseFinding, type Office
 
 export const DEFAULT_BANDS: OfficeScoreBands = { low: 1, medium: 25, high: 50, critical: 80 };
 
+/**
+ * Findings whose fate a plugin's answer decided, such as a button that runs a macro the plugins kept. They weigh
+ * nothing, in this run's score and in the weights a container gets: the plugin's own findings score that content.
+ */
+const decided = new WeakSet<DefuseFinding>();
+
+/** Marks a finding as one a plugin's answer decided. */
+export function pluginDecided(f: DefuseFinding): void {
+  decided.add(f);
+}
+
 interface Combination {
   name: string;
   weight: number;
@@ -28,6 +39,7 @@ export const COMBINATIONS: Combination[] = [
 
 /** The caller's weights first, then the built-in table. A kind from another package scores at the weight it carries. */
 export function weightOf(f: DefuseFinding, options: OfficeOptions): number {
+  if (decided.has(f)) return 0;
   const w = options.scoreWeights ?? [];
   const exact = w.find(x => x.category === f.category && x.detail === f.detail);
   if (exact) return exact.weight;

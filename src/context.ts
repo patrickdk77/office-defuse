@@ -4,6 +4,7 @@ import type { Format } from './formats';
 import type { SpillSink, TempDir } from './io';
 import { checkLink, isLocalTarget, mismatchedLabel } from './links';
 import { type CompoundPlan, type FlatOpcLayout, PackagePlan, type RtfCut } from './plan';
+import { pluginDecided } from './score';
 import { type ByteSource, OfficeCategory as C, OfficeDetail as D, type DefuseFinding, type OfficeFinding, type OfficeFindingAction, type OfficeOptions } from './types';
 import { type EntityBudget, showReferences, type XmlHandler, type XmlLimits, type XmlNotes, XmlTokenizer } from './xml';
 import type { ZipArchive, ZipEntry } from './zip';
@@ -61,11 +62,6 @@ export interface RunState {
   kept: Map<string, Expected>;
   /** Plugin output that waits for the rewrite. The run disposes of it when it ends. */
   held: SpillSink[];
-  /**
-   * Findings whose content a plugin kept, such as EMBEDDED/PACKAGE for a package a plugin passed. They stay in the
-   * report as info and leave the score to what the plugin found, as pdf-defuse leaves out a kept attached file.
-   */
-  superseded: WeakSet<DefuseFinding>;
   /** Sources the rewrite reads from, such as a compound file a plugin returned, which the run closes when it ends. */
   sources: ByteSource[];
   /** The container, once the format rules have read it. */
@@ -75,18 +71,12 @@ export interface RunState {
    * that run one of its macros by name then stay too.
    */
   macrosKept?: boolean;
+  /** The script plugins answered for the document's own VBA project, whether they kept it or removed it. */
+  macrosAnswered?: boolean;
 }
 
 /** A macro of the document's own project, by name: Macro, Module.Macro, or Excel's [0]!Macro for this workbook. */
 const OWN_MACRO = /^(?:\[0\]!)?[\p{L}_][\p{L}\p{N}_]*(?:\.[\p{L}_][\p{L}\p{N}_]*)?$/u;
-
-/**
- * 'info' for a link or callback that runs one of the document's own macros when its project stays, so the finding
- * reports it without removing it. Undefined otherwise, leaving the action to the overrides.
- */
-export function ownMacro(run: RunState, name: string): 'info' | undefined {
-  return run.macrosKept && OWN_MACRO.test(name.trim()) ? 'info' : undefined;
-}
 
 /** A finding the rules made, with its action, which the rewrite reads. Past 200 of one kind, `finding` is absent. */
 export interface Reported {
@@ -153,7 +143,7 @@ export class RunContext {
 
   /**
    * Records a finding. Past 200 of one kind, as in pdf-defuse, one more finding counts the rest. `action` replaces the
-   * action the overrides give, for content whose fate a plugin decided.
+   * action the overrides give, for content whose fate a plugin decided. Such a finding as info weighs nothing.
    */
   report(category: C, detail: D, location?: string, data?: Record<string, string | number>, action?: OfficeFindingAction): Reported {
     const act = action ?? this.factory.actionFor(category, detail);
@@ -164,7 +154,7 @@ export class RunContext {
     if (n <= 200) {
       const finding = this.factory.make(category, detail, location, data);
       finding.action = act;
-      if (action === 'info') this.run.superseded.add(finding);
+      if (action === 'info') pluginDecided(finding);
       this.shared.findings.push(finding);
       return { action: act, finding };
     }
@@ -175,17 +165,39 @@ export class RunContext {
       this.shared.overflow.set(k, counted);
       const finding = this.factory.make(category, detail, 'additional occurrences', counted);
       finding.action = act;
-      if (action === 'info') this.run.superseded.add(finding);
+      if (action === 'info') pluginDecided(finding);
       this.shared.findings.push(finding);
     }
     counted.count = Number(counted.count) + 1;
     return { action: act };
   }
 
+  /**
+   * Reports a link, callback or field that runs the macro `name`. When the script plugins answered for the document's
+   * own VBA project, a trigger of one of its macros follows their answer: it stays, as info, when they kept the
+   * project, and the overrides decide it when they removed the project. Either way it weighs nothing, since the
+   * plugins scored the macro it runs.
+   */
+  macroTrigger(category: C, detail: D, location: string, data: Record<string, string | number>, name: string | undefined): Reported {
+    const own = name !== undefined && this.run.macrosAnswered === true && OWN_MACRO.test(name.trim());
+    const r = this.report(category, detail, location, data, own && this.run.macrosKept ? 'info' : undefined);
+    if (own && r.finding) pluginDecided(r.finding);
+    return r;
+  }
+
   /** Reports content that goes whatever the overrides say: its action is strip, or reject when the caller asked for that. */
   removal(category: C, detail: D, location?: string, data?: Record<string, string | number>): Reported {
     const act = this.factory.actionFor(category, detail);
     return this.report(category, detail, location, data, act === 'info' ? 'strip' : act);
+  }
+
+  /**
+   * Takes back a finding reported before a plugin answered for its content, whose answer is final. A finding past the
+   * first 200 of its kind was only counted, so there is none to take back.
+   */
+  retract(finding: DefuseFinding | undefined): void {
+    const i = finding ? this.shared.findings.indexOf(finding) : -1;
+    if (i >= 0) this.shared.findings.splice(i, 1);
   }
 
   /** Adds findings from another package as they are, such as those a plugin made inside a file. */

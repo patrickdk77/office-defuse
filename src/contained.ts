@@ -1,4 +1,4 @@
-import type { Expected, RunContext, RunState } from './context';
+import type { Expected, Reported, RunContext, RunState } from './context';
 import { stopsTree } from './errors';
 import { SpillSink } from './io';
 import { sniffType } from './sniff';
@@ -13,6 +13,11 @@ export type RunPluginContext = PluginContext & { [RUN_OPTIONS]?: OfficeOptions }
 /** What the plugins decided about a file inside the file. Undefined from `decideContained` means no plugin took it. */
 export interface ContainedDecision {
   keep: boolean;
+  /**
+   * A plugin passed, cleaned or removed the file. Its answer is final: the report holds it and what the plugin found,
+   * and office-defuse reports nothing of its own about the file.
+   */
+  answered?: boolean;
   /** The bytes a plugin kept in place of the file's own. */
   replacement?: SpillSink;
 }
@@ -81,7 +86,7 @@ export async function decideContained(ctx: RunContext, inner: InnerFile): Promis
     if (expected) {
       ctx.report(C.Embedded, expected.result === 'passed' ? D.PluginPassed : D.PluginScrubbed, inner.location, { plugin: expected.plugin, name: name ?? '' });
       pushContained(ctx, expected.findings, inner.location, name);
-      return { keep: true };
+      return { keep: true, answered: true };
     }
     if (!plugins.length) return undefined;
     const source = decoded.source();
@@ -117,13 +122,14 @@ export async function decideContained(ctx: RunContext, inner: InnerFile): Promis
             run.kept.set(out.digest(), { result: 'scrubbed', plugin: plugin.name, findings: r.outputFindings });
             keep = true;
           } else ctx.removal(C.Embedded, r.result === 'removed' ? D.PluginRemoved : D.PluginFailed, inner.location, data);
+          const answered = keep || r.result === 'removed';
           pushContained(ctx, r.findings, inner.location, name);
           const replacement = keep && out.length > 0 ? out : undefined;
           if (replacement) {
             if (!replacement.spilled) run.retained += replacement.length;
             run.held.push(replacement);
           } else await out.dispose();
-          return { keep, replacement };
+          return { keep, replacement, answered };
         } catch (e) {
           await out.dispose();
           passOn(run, e);
@@ -141,11 +147,12 @@ export async function decideContained(ctx: RunContext, inner: InnerFile): Promis
 }
 
 /**
- * The rule a file gets for being there, such as EMBEDDED/OLE_OBJECT, applies when no plugin took the file. A plugin
- * that kept the file turns those findings to info, since the content stays.
+ * Reports the rule a file gets for being there, such as EMBEDDED/OLE_OBJECT, when no plugin answered for the file. A
+ * plugin's answer is final: when one answered, nothing is reported, and the result only says whether the file stays.
  */
-export function presence(decision: ContainedDecision | undefined): 'info' | undefined {
-  return decision?.keep ? 'info' : undefined;
+export function ownFinding(ctx: RunContext, decision: ContainedDecision | undefined, category: C, detail: D, location: string, data?: Record<string, string | number>): Reported {
+  if (decision?.answered) return { action: decision.keep ? 'info' : 'strip' };
+  return ctx.report(category, detail, location, data);
 }
 
 /** Bytes in a spill sink the run holds until it ends, as the rewrite takes a plugin's output. */

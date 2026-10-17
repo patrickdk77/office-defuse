@@ -47,7 +47,7 @@ describe('file plugins', () => {
     ]);
     expect(context.deadline).to.be.a('number');
     // The plugin kept the file, so the finding for its being there only reports.
-    expect(r.findings.map(f => `${f.category}/${f.detail}/${f.action}`)).to.deep.equal(['EMBEDDED/PLUGIN_PASSED/info', 'EMBEDDED/PACKAGE/info']);
+    expect(r.findings.map(f => `${f.category}/${f.detail}/${f.action}`)).to.deep.equal(['EMBEDDED/PLUGIN_PASSED/info']);
     expect([r.status, r.risk]).to.deep.equal(['clean', 'NONE']);
   });
 
@@ -57,7 +57,7 @@ describe('file plugins', () => {
     expect(r.status).to.equal('clean');
     const out = must(r.bytes, 'output');
     expect(await entryNames(out)).to.include('word/embeddings/Book1.xlsx');
-    expect(kinds(must(r.after, 'after'))).to.deep.equal(['EMBEDDED/PLUGIN_PASSED', 'EMBEDDED/PACKAGE']);
+    expect(kinds(must(r.after, 'after'))).to.deep.equal(['EMBEDDED/PLUGIN_PASSED']);
     expect(await structureProblems(out)).to.deep.equal([]);
   });
 
@@ -72,7 +72,7 @@ describe('file plugins', () => {
     const chunks: Buffer[] = [];
     for await (const c of zip.read(must(zip.get('word/embeddings/Book1.xlsx'), 'part'))) chunks.push(Buffer.from(c));
     expect(Buffer.concat(chunks).equals(cleaned)).to.equal(true);
-    expect(kinds(must(r.after, 'after'))).to.deep.equal(['EMBEDDED/PLUGIN_SCRUBBED', 'EMBEDDED/PACKAGE']);
+    expect(kinds(must(r.after, 'after'))).to.deep.equal(['EMBEDDED/PLUGIN_SCRUBBED']);
   });
 
   it('drops a file a plugin removed, failed on, or scrubbed without writing anything, whatever the overrides say', async () => {
@@ -159,7 +159,7 @@ describe('file plugins', () => {
     // The preview image is a whole file too, and the plugin passes it as well.
     expect([kept.status, kept.before.findings.map(f => `${f.category}/${f.detail}/${f.action} ${f.location}`)]).to.deep.equal([
       'clean',
-      ['EMBEDDED/OLE_OBJECT/info content.xml', 'EMBEDDED/PLUGIN_PASSED/info Object 1', 'EMBEDDED/PLUGIN_PASSED/info ObjectReplacements/Object 1'],
+      ['EMBEDDED/PLUGIN_PASSED/info Object 1', 'EMBEDDED/PLUGIN_PASSED/info ObjectReplacements/Object 1'],
     ]);
     expect(await entryText(must(kept.bytes, 'output'), 'content.xml')).to.include('draw:object-ole');
     // A plugin that removes the object and passes its preview.

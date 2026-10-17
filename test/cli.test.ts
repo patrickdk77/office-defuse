@@ -67,8 +67,8 @@ describe('command-line tool', () => {
       return [r.status, details(r.report, 'EMBEDDED')];
     };
     expect(embedded([])).to.deep.equal([1, ['PACKAGE:strip']]);
-    expect(embedded(['--defuse-embedded-office'])).to.deep.equal([0, ['PLUGIN_PASSED:info', 'PACKAGE:info']]);
-    expect(embedded(['--plugin', path.join(dir, 'keep.js')])).to.deep.equal([0, ['PLUGIN_PASSED:info', 'PACKAGE:info']]);
+    expect(embedded(['--defuse-embedded-office'])).to.deep.equal([0, ['PLUGIN_PASSED:info']]);
+    expect(embedded(['--plugin', path.join(dir, 'keep.js')])).to.deep.equal([0, ['PLUGIN_PASSED:info']]);
     const script = runCli(['inspect', at('zip', 'minimal.docx'), '--plugin', path.join(dir, 'script.js')]);
     expect([script.status, script.stderr.toString().split('\n')[0]]).to.deep.equal([3, 'A plugin module must export plugins with kind "file"']);
   });

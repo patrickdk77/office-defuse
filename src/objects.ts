@@ -1,6 +1,6 @@
 import { type CfbEntry, CompoundFile, entryPath, showName } from './cfb';
 import { writeCfb } from './cfb-writer';
-import { type ContainedDecision, decideContained, presence, spillOf } from './contained';
+import { type ContainedDecision, decideContained, spillOf } from './contained';
 import { clip, type Reported, type RunContext } from './context';
 import { StopError } from './errors';
 import { controlStorageProblem, WORD_CONTROL_STREAMS } from './forms';
@@ -58,8 +58,15 @@ export async function compoundRules(ctx: RunContext, cfb: CompoundFile, prefix: 
   const drop = (r: Reported, e: CfbEntry) => {
     if (r.action === 'strip' && e.kind !== 'root') plan?.drop.add(e);
   };
+  /** Objects a plugin answered for. Its answer is final, so nothing inside them gets the rules here. */
+  const answered = new Set<CfbEntry>();
+  const inAnswered = (e: CfbEntry) => {
+    for (let p = e.parent; p; p = p.parent) if (answered.has(p)) return true;
+    return false;
+  };
+  // A storage comes after the storage that holds it, so an object is decided before what it holds.
   for (const e of cfb.entries) {
-    if (e.kind === 'stream' || inDesigner(e)) continue;
+    if (e.kind === 'stream' || inDesigner(e) || inAnswered(e)) continue;
     const child = (name: string) => e.children.find(c => upper(c) === name);
     const names = new Set(e.children.map(upper));
     const parent = e.parent ? upper(e.parent) : '';
@@ -69,7 +76,15 @@ export async function compoundRules(ctx: RunContext, cfb: CompoundFile, prefix: 
         : [...names].some(n => OBJECT_STREAMS.has(n) || CONTROL_STREAMS.has(n)) ||
           (parent === 'OBJECTPOOL' && e.parent?.parent?.kind === 'root') ||
           (e.parent?.kind === 'root' && /^MBD[0-9A-F]{8}$/i.test(e.name));
-    if (isObject) objects.add(e);
+    if (isObject) {
+      objects.add(e);
+      const decided = await objectRules(ctx, cfb, e, at(prefix, e), plan, e.kind === 'root' ? rootDecision : undefined);
+      for (const r of decided.found) drop(r, e);
+      if (decided.answered) {
+        answered.add(e);
+        continue;
+      }
+    }
     // A VBA project: a VBA storage with a dir stream, which names the modules (MS-OVBA 2.2). The storage that holds
     // the project goes, or the VBA storage when that is the root. With script plugins, the project stays when they
     // pass every module and the rewrite can take out its compiled code: in the file the rewrite writes, and outside any
@@ -80,13 +95,14 @@ export async function compoundRules(ctx: RunContext, cfb: CompoundFile, prefix: 
       const decision = plan && !objects.has(e) && !inObject(e) ? await decideVba(ctx, cfb, vba, at(prefix, vba), plan) : undefined;
       const data = { storage: at(prefix, vba), ...(decision?.reason ? { reason: decision.reason } : {}) };
       if (decision?.keep) for (const d of decision.designers ?? []) designers.add(d);
-      drop(ctx.report(C.Macro, D.VbaProject, at(prefix, vba), data, decision?.keep ? 'info' : undefined), e.kind === 'root' ? vba : e);
+      // The plugins' answers are final: the report holds them, and nothing of office-defuse's own about the project.
+      if (decision?.answered) drop({ action: decision.keep ? 'info' : 'strip' }, e.kind === 'root' ? vba : e);
+      else drop(ctx.report(C.Macro, D.VbaProject, at(prefix, vba), data), e.kind === 'root' ? vba : e);
     }
     if (e.kind === 'storage' && (upper(e) === '_VBA_PROJECT_CUR' || upper(e) === 'MACROS') && e.children.length && !projects.has(e)) {
       // Excel's and Word's project storages, without the dir stream a whole project has.
       drop(ctx.report(C.Macro, D.VbaProject, at(prefix, e), { storage: at(prefix, e) }), e);
     }
-    if (isObject) for (const r of await objectRules(ctx, cfb, e, at(prefix, e), plan, e.kind === 'root' ? rootDecision : undefined)) drop(r, e);
   }
 }
 
@@ -189,8 +205,9 @@ async function objectFile(ctx: RunContext, cfb: CompoundFile, e: CfbEntry, d: Ob
  * One OLE object's storage: a control, a linked object, or an embedded one, with what it holds. Returns its findings,
  * and a strip when a plugin removed the object. In the file the rewrite writes, `plan` is set and an embedded object
  * goes to the plugins first. `given` is the verdict on an object whose container showed it to the plugins already.
+ * `answered` says a plugin answered for the object, so nothing else here looks at it or at what it holds.
  */
-async function objectRules(ctx: RunContext, cfb: CompoundFile, e: CfbEntry, location: string, plan?: CompoundPlan, given?: ContainedDecision): Promise<Reported[]> {
+async function objectRules(ctx: RunContext, cfb: CompoundFile, e: CfbEntry, location: string, plan?: CompoundPlan, given?: ContainedDecision): Promise<{ found: Reported[]; answered: boolean }> {
   const d = await describeObject(cfb, e, location);
   const data: Record<string, string | number> = { storage: location };
   if (d.clsid) data.clsid = d.clsid;
@@ -201,10 +218,10 @@ async function objectRules(ctx: RunContext, cfb: CompoundFile, e: CfbEntry, loca
     // A Forms 2.0 control stays when its storage and properties are as Office writes them. Its picture for printing,
     // a metafile beside them, goes on its own.
     const problem = await controlStorageProblem(cfb, e, WORD_CONTROL_STREAMS);
-    if (problem) return [ctx.report(C.Control, D.ActiveX, location, { ...data, reason: clip(problem) })];
+    if (problem) return { found: [ctx.report(C.Control, D.ActiveX, location, { ...data, reason: clip(problem) })], answered: false };
     const print = e.children.find(c => c.kind === 'stream' && c.name === '\x03PRINT');
     if (print && ctx.report(C.Control, D.ControlPicture, `${location}/${showName(print.name)}`, { storage: location, bytes: print.size }).action === 'strip') plan?.drop.add(print);
-    return [ctx.report(C.Control, D.FormsControl, location, data)];
+    return { found: [ctx.report(C.Control, D.FormsControl, location, data)], answered: false };
   }
   const found: Reported[] = [];
   if (d.pkg) {
@@ -214,11 +231,12 @@ async function objectRules(ctx: RunContext, cfb: CompoundFile, e: CfbEntry, loca
   if (d.linked) found.push(linkedObject(ctx, d, location, { storage: location, ...(d.clsid ? { clsid: d.clsid } : {}) }));
   else {
     const decision = given ?? (plan ? await objectFile(ctx, cfb, e, d, location, plan) : undefined);
-    found.push(ctx.report(C.Embedded, D.OleObject, location, data, presence(decision)));
+    if (decision?.answered) return { found: [...found, { action: decision.keep ? 'info' : 'strip' }], answered: true };
+    found.push(ctx.report(C.Embedded, D.OleObject, location, data));
     if (decision && !decision.keep) found.push({ action: 'strip' });
   }
   if (d.equation) found.push(ctx.report(C.Embedded, D.Equation, location, data));
-  return found;
+  return { found, answered: false };
 }
 
 /**
