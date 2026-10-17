@@ -26,18 +26,18 @@ export class Quotes {
 }
 
 /**
- * Functions that reach outside the file when a formula is calculated: WEBSERVICE and IMAGE fetch a URL, RTD starts a
+ * Functions that reach outside the file when a formula is calculated: WEBSERVICE and IMAGE load a URL, RTD starts a
  * COM server, CALL and REGISTER call into a DLL, and EXEC runs a program. A prefix such as `_xlfn.` or
  * `COM.MICROSOFT.` names the same function.
  */
-const FETCH = ['WEBSERVICE', 'IMAGE'];
+const LOAD = ['WEBSERVICE', 'IMAGE'];
 const RUN = ['RTD', 'CALL', 'REGISTER', 'REGISTER.ID', 'EXEC'];
 
 /** What a function a formula calls does outside the file, or undefined when it does nothing there. */
-export function riskyFunction(name: string): 'fetch' | 'run' | undefined {
+export function riskyFunction(name: string): 'load' | 'run' | undefined {
   const n = name.toUpperCase();
   const is = (f: string) => n === f || n.endsWith(`.${f}`);
-  if (FETCH.some(is)) return 'fetch';
+  if (LOAD.some(is)) return 'load';
   if (RUN.some(is)) return 'run';
   return undefined;
 }
@@ -47,7 +47,7 @@ export class FunctionCalls {
   private readonly quotes = new Quotes();
   private word = '';
   private spaced = false;
-  readonly found = new Map<string, 'fetch' | 'run'>();
+  readonly found = new Map<string, 'load' | 'run'>();
 
   write(t: string): void {
     for (const c of t) {
@@ -73,7 +73,7 @@ export class FunctionCalls {
 }
 
 /** The functions a formula's whole text calls that reach outside the file. */
-export function formulaCalls(formula: string): Map<string, 'fetch' | 'run'> {
+export function formulaCalls(formula: string): Map<string, 'load' | 'run'> {
   const f = new FunctionCalls();
   f.write(formula);
   return f.found;
@@ -96,8 +96,8 @@ export type BiffNameRef = { kind: 'name'; index: number } | { kind: 'namex'; ixt
  * add-in and newer ones by the name the formula names them with, such as `_xlfn.WEBSERVICE`. The walk stops at a
  * token it does not know the size of.
  */
-export function biffCalls(rgce: Uint8Array, nameOf: (ref: BiffNameRef) => string | undefined): Map<string, 'fetch' | 'run'> {
-  const found = new Map<string, 'fetch' | 'run'>();
+export function biffCalls(rgce: Uint8Array, nameOf: (ref: BiffNameRef) => string | undefined): Map<string, 'load' | 'run'> {
+  const found = new Map<string, 'load' | 'run'>();
   const u16 = (at: number) => rgce[at] | (rgce[at + 1] << 8);
   const u32 = (at: number) => (rgce[at] | (rgce[at + 1] << 8) | (rgce[at + 2] << 16) | (rgce[at + 3] << 24)) >>> 0;
   const add = (name: string | undefined) => {

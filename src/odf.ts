@@ -154,7 +154,7 @@ export class EntryRules implements XmlHandler {
       if (odfNs(a.ns) !== NS.table || (a.local !== 'formula' && a.local !== 'expression')) continue;
       const strip = { strip: new Set([attributeKey(a.ns, a.local)]) };
       if (callsDde(a.value)) this.edit(this.report(C.Dde, D.Formula, { formula: clip(a.value) }), raw, strip);
-      for (const [fn, kind] of formulaCalls(a.value)) this.edit(this.report(kind === 'fetch' ? C.External : C.Macro, D.Formula, { function: clip(fn), formula: clip(a.value) }), raw, strip);
+      for (const [fn, kind] of formulaCalls(a.value)) this.edit(this.report(kind === 'load' ? C.External : C.Macro, D.Formula, { function: clip(fn), formula: clip(a.value) }), raw, strip);
     }
     if (href === undefined || isFragment(href) || (el.ns === NS.script && el.local === 'event-listener') || (el.ns === NS.presentation && el.local === 'event-listener')) return;
     // A database document names its own embedded database this way.

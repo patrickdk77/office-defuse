@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1 - 2026-10-17
+
+- Formula functions that load a URL, such as WEBSERVICE, carry the internal label `load`, not `fetch`, which security scanners took for network access. Nothing else changes.
+
 ## 0.3.0 - 2026-10-17
 
 - A plugin's answer is final. A file a plugin passed, scrubbed or removed gets none of office-defuse's own findings, such as EMBEDDED/PACKAGE, EMBEDDED/OLE_OBJECT, EMBEDDED/EQUATION or MACRO/VBA_PROJECT, and office-defuse no longer looks inside it for VBA projects and objects. 0.2.4 reported those findings next to the plugin's, scored a removed file at office-defuse's weight, and removed an Equation Editor object a plugin passed.

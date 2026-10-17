@@ -478,7 +478,7 @@ class PartRules implements XmlHandler {
       else if (entity !== undefined) this.remove(this.ctx.report(C.Dde, D.Formula, this.part, { formula: clip(shown.text), entity: clip(entity) }), this.formula);
       if (!this.macroSheet)
         for (const [fn, kind] of calls.found)
-          this.remove(this.ctx.report(kind === 'fetch' ? C.External : C.Macro, D.Formula, this.part, { function: clip(fn), formula: clip(shown.text) }), this.formula);
+          this.remove(this.ctx.report(kind === 'load' ? C.External : C.Macro, D.Formula, this.part, { function: clip(fn), formula: clip(shown.text) }), this.formula);
       this.formula = undefined;
     }
     if (ns === VML_EXCEL_NS && el.local === 'FmlaMacro' && this.macroText) {

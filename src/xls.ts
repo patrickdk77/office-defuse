@@ -245,7 +245,7 @@ async function sheetRules(
       if (b.length < at + 2) continue;
       const cce = b[at] | (b[at + 1] << 8);
       for (const [fn, kind] of biffCalls(b.subarray(at + 2, at + 2 + cce), nameOf))
-        ctx.report(kind === 'fetch' ? C.External : C.Macro, D.Formula, location, { sheet: clip(s.name), function: clip(fn) });
+        ctx.report(kind === 'load' ? C.External : C.Macro, D.Formula, location, { sheet: clip(s.name), function: clip(fn) });
     }
   }
 }
