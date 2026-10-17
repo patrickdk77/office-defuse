@@ -170,7 +170,9 @@ describe('disarm: compound files', () => {
   });
 
   it('rejects a file whose findings lie inside a stream, which the rewrite does not change', async () => {
-    for (const file of ['fields.doc', 'xlm.xls', 'objects.ppt', 'rc4.xls']) {
+    // Excel's and PowerPoint's records are rewritten, but not Word's fields, Excel's cell formulas, nor a workbook whose
+    // sheet starts where no record does.
+    for (const file of ['fields.doc', 'formula-functions.xls', 'xls-variants.xls']) {
       const r = await disarmOffice(fixture('ole', file));
       expect([file, r.status, r.bytes, of(r.before, 'PROCESSING/VERIFICATION_FAILED').length]).to.deep.equal([file, 'rejected', undefined, 1]);
       // The upload's own verdict keeps its score.

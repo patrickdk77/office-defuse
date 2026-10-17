@@ -1,11 +1,14 @@
-import { autoName, type BiffRecord, parseBoundSheet, parseLbl, R, RecordReader, type Sheet, xlString } from './biff';
+import { autoName, type BiffRecord, objSubrecords, parseBoundSheet, parseLbl, R, RecordReader, type Sheet, xlString } from './biff';
 import type { CfbEntry, CompoundFile } from './cfb';
-import { clip, type RunContext } from './context';
+import { clip, ownMacro, type Reported, type RunContext } from './context';
 import { StopError } from './errors';
 import { type BiffNameRef, biffCalls } from './formulas';
+import { SpillSink } from './io';
 import { isFragment } from './links';
 import { ByteReader, bounded, readMoniker, utf16 } from './oleobj';
+import type { CompoundPlan } from './plan';
 import { OfficeCategory as C, OfficeDetail as D } from './types';
+import { hasEdits, noEdits, RewriteError, rewriteWorkbook, type WorkbookEdits } from './xls-writer';
 
 const STATES = ['visible', 'hidden', 'very hidden', 'hidden'];
 
@@ -27,6 +30,8 @@ interface SupBook {
   dde: boolean;
   /** The names its ExternName records give, in order, which a formula refers to by index. */
   names: string[];
+  /** Where the record starts in the stream. */
+  offset: number;
 }
 
 /** Record types of cell formulas (MS-XLS 2.4.127, 2.4.260 and 2.4.4): FORMULA, SHRFMLA and ARRAY. */
@@ -63,7 +68,15 @@ export async function workbookKind(cfb: CompoundFile, stream: CfbEntry, deadline
  * names Excel runs as macros, and the DDE, OLE and workbook links. The sheets give shapes that run macros and
  * hyperlinks. An encrypted workbook goes through `unlock`.
  */
-export async function excelRules(ctx: RunContext, cfb: CompoundFile, stream: CfbEntry, unlock: Unlock): Promise<void> {
+/** An ActiveX control a sheet's Obj record keeps in the Ctls stream: its ProgID and where its data is. */
+export interface CtlsControl {
+  progId: string;
+  position: number;
+  size: number;
+  sheet: string;
+}
+
+export async function excelRules(ctx: RunContext, cfb: CompoundFile, stream: CfbEntry, unlock: Unlock, plan?: CompoundPlan, controls: CtlsControl[] = []): Promise<void> {
   const location = stream.name;
   const records = new RecordReader(cfb, stream, 0, ctx.settings.deadline);
   const first = await records.next();
@@ -76,21 +89,29 @@ export async function excelRules(ctx: RunContext, cfb: CompoundFile, stream: Cfb
   const names: string[] = [];
   /** The SupBook each XTI of the ExternSheet record names. */
   const xti: number[] = [];
+  const edits = noEdits();
+  /** Names that run a macro and go, by their Lbl record, given new names once every name is known. */
+  const renames: Array<{ offset: number; event: string }> = [];
   for (let r = await records.next(); r && r.type !== R.eof; r = await records.next()) {
     if (r.type === R.filePass) {
+      const before = ctx.findings.length;
       decrypt = await unlock(ctx, r, location);
+      // The rewrite writes the workbook decrypted, so one VelvetSweatshop opens is rewritten when that finding strips.
+      if (ctx.findings.slice(before).some(f => f.category === C.Encrypted && f.detail === D.DefaultPassword && f.action === 'strip')) edits.decrypt = true;
       continue;
     }
     const body = decrypt(r);
-    if (r.type === R.boundSheet) sheets.push(parseBoundSheet(body, biff8));
+    if (r.type === R.boundSheet) sheets.push({ ...parseBoundSheet(body, biff8), record: r.offset });
     else if (r.type === R.lbl) {
       const name = parseLbl(body, biff8);
       names.push(name.name);
       const auto = autoName(name.name);
-      if (auto) ctx.report(C.Macro, auto.onOpen ? D.EventOnOpen : D.Event, location, { event: auto.event, name: clip(name.name) });
+      // Removing the name would renumber the names after it, which formulas refer to by number, so it is renamed.
+      if (auto && ctx.report(C.Macro, auto.onOpen ? D.EventOnOpen : D.Event, location, { event: auto.event, name: clip(name.name) }).action === 'strip')
+        renames.push({ offset: r.offset, event: auto.event });
     } else if (r.type === R.supBook && body.length >= 4) {
       const cch = body[2] | (body[3] << 8);
-      books.push({ ctab: body[0] | (body[1] << 8), cch, path: cch > 0 && cch <= 0xff ? xlString(body, 4, cch).text : '', ole: false, dde: false, names: [] });
+      books.push({ ctab: body[0] | (body[1] << 8), cch, path: cch > 0 && cch <= 0xff ? xlString(body, 4, cch).text : '', ole: false, dde: false, names: [], offset: r.offset });
     } else if (r.type === R.externSheet && biff8 && body.length >= 2) {
       const n = body[0] | (body[1] << 8);
       for (let k = 0; k < n && 2 + k * 6 + 2 <= body.length; k++) xti.push(body[2 + k * 6] | (body[3 + k * 6] << 8));
@@ -102,25 +123,57 @@ export async function excelRules(ctx: RunContext, cfb: CompoundFile, stream: Cfb
       else books[books.length - 1].dde = true;
     }
   }
-  for (const b of books) linkRules(ctx, b, location);
+  // A link that goes keeps its SupBook, which formulas count to by index, with a path to the workbook itself.
+  for (const b of books) if (linkRules(ctx, b, location)?.action === 'strip') edits.selfBooks.add(b.offset);
   const nameOf = (ref: BiffNameRef) => (ref.kind === 'name' ? names[ref.index - 1] : books[xti[ref.ixti] ?? -1]?.names[ref.index - 1]);
-  for (const s of sheets) await sheetRules(ctx, cfb, stream, s, decrypt, location, biff8 ? nameOf : undefined);
+  // A macro of the workbook's own: an external name of the SupBook that is the workbook itself, as Excel names a VBA
+  // macro a button runs. A defined name may stand for anything, so it is not one.
+  const ownName = (ref: BiffNameRef) => (ref.kind === 'namex' && books[xti[ref.ixti] ?? -1]?.cch === 0x401 ? nameOf(ref) : undefined);
+  for (const s of sheets) await sheetRules(ctx, cfb, stream, s, decrypt, location, edits, controls, biff8 ? nameOf : undefined, biff8 ? ownName : undefined);
+  const taken = new Set(names.map(n => n.toLowerCase()));
+  for (const { offset, event } of renames) {
+    let k = 1;
+    while (taken.has(`removed_${event}_${k}`.toLowerCase())) k++;
+    const name = `Removed_${event}_${k}`;
+    taken.add(name.toLowerCase());
+    edits.names.set(offset, name);
+  }
+  // BIFF5 has no SupBook, HLink or Obj macro records in the shape BIFF8 has, so only its sheets and names change. What
+  // else strips stays, and the check of the output says so.
+  if (!biff8) {
+    edits.objMacros.clear();
+    edits.selfBooks.clear();
+    edits.hyperlinks.clear();
+  }
+  if (!plan || !hasEdits(edits)) return;
+  const sink = new SpillSink(ctx.run.temp, ctx.run.threshold);
+  ctx.run.held.push(sink);
+  try {
+    await rewriteWorkbook(cfb, stream, edits, biff8, decrypt, sink, ctx.settings.deadline);
+    await sink.close();
+    plan.replace.set(stream, sink);
+  } catch (e) {
+    // Left as it is, the stream still holds what the findings name, and the check of the output says so.
+    if (!(e instanceof RewriteError)) throw e;
+  }
 }
 
-/** A SupBook record, read as MS-XLS 2.4.271 and oletools tell its kinds apart. */
-function linkRules(ctx: RunContext, b: SupBook, location: string): void {
-  if (b.cch === 0x401 || b.cch === 0x3a01 || b.path === ' ' || b.path === '\0' || !b.path) return;
+/**
+ * A SupBook record, read as MS-XLS 2.4.271 and oletools tell its kinds apart. A path that starts with U+0002 or U+0003
+ * refers to the workbook itself, as LibreOffice reads it.
+ */
+function linkRules(ctx: RunContext, b: SupBook, location: string): Reported | undefined {
+  if (b.cch === 0x401 || b.cch === 0x3a01 || b.path === ' ' || b.path === '\0' || !b.path || b.path.charCodeAt(0) === 2 || b.path.charCodeAt(0) === 3) return undefined;
   if (b.ctab === 0) {
     // A DDE or OLE data source: the application or class, U+0003, and the topic or file.
     const [application, topic = ''] = b.path.split('\x03');
     if (b.ole && !b.dde) {
       const data = { source: 'SupBook', className: clip(application) };
-      if (topic) ctx.external(D.Object, topic, location, data, 'linked object');
-      else ctx.report(C.External, D.Object, location, data);
-    } else ctx.report(C.Dde, D.Link, location, { application: clip(application), topic: clip(topic) });
-    return;
+      return topic ? ctx.external(D.Object, topic, location, data, 'linked object') : ctx.report(C.External, D.Object, location, data);
+    }
+    return ctx.report(C.Dde, D.Link, location, { application: clip(application), topic: clip(topic) });
   }
-  ctx.external(D.Workbook, virtualPath(b.path), location, { source: 'SupBook' }, 'external workbook');
+  return ctx.external(D.Workbook, virtualPath(b.path), location, { source: 'SupBook' }, 'external workbook');
 }
 
 /**
@@ -148,23 +201,43 @@ export function virtualPath(p: string): string {
 }
 
 /** One sheet's substream, with any chart substreams inside it: Obj records that run macros, and hyperlinks. */
-async function sheetRules(ctx: RunContext, cfb: CompoundFile, stream: CfbEntry, s: Sheet, decrypt: Decrypt, location: string, nameOf?: (ref: BiffNameRef) => string | undefined): Promise<void> {
+async function sheetRules(
+  ctx: RunContext,
+  cfb: CompoundFile,
+  stream: CfbEntry,
+  s: Sheet,
+  decrypt: Decrypt,
+  location: string,
+  edits: WorkbookEdits,
+  controls: CtlsControl[],
+  nameOf?: (ref: BiffNameRef) => string | undefined,
+  ownName?: (ref: BiffNameRef) => string | undefined,
+): Promise<void> {
   const records = new RecordReader(cfb, stream, s.position, ctx.settings.deadline);
   const bof = await records.next();
   if (bof?.type !== R.bof || bof.body.length < 4) return;
   const bofType = bof.body[2] | (bof.body[3] << 8);
   // The sheet's own BOF says what it is, and so does its BoundSheet record. Either one makes a macro sheet.
   const macroSheet = s.type === 1 || bofType === 0x0040;
-  if (macroSheet) ctx.report(C.Macro, D.XlmMacrosheet, location, { sheet: clip(s.name), state: STATES[s.state] });
+  // A macro sheet becomes an empty worksheet of the same name, so the sheets after it keep their indexes.
+  if (macroSheet && ctx.report(C.Macro, D.XlmMacrosheet, location, { sheet: clip(s.name), state: STATES[s.state] }).action === 'strip' && s.record !== undefined) edits.emptySheets.add(s.record);
   let depth = 1;
   for (let r = await records.next(); r && depth > 0; r = await records.next()) {
     if (r.type === R.bof) depth++;
     else if (r.type === R.eof) depth--;
     else if (r.type === R.obj) {
-      if (objMacro(decrypt(r))) ctx.report(C.Macro, D.Link, location, { sheet: clip(s.name) });
+      const body = decrypt(r);
+      const control = ctlsControl(body);
+      if (control) controls.push({ ...control, sheet: s.name });
+      const macro = objMacro(body);
+      if (!macro) continue;
+      // A shape that runs one of the workbook's own macros stays when its VBA project does.
+      const name = macro.ref && ownName ? ownName(macro.ref) : undefined;
+      const data = { sheet: clip(s.name), ...(macro.ref && nameOf ? { macro: clip(nameOf(macro.ref) ?? '') } : {}) };
+      if (ctx.report(C.Macro, D.Link, location, data, name === undefined ? undefined : ownMacro(ctx.run, name)).action === 'strip') edits.objMacros.add(r.offset);
     } else if (r.type === R.hlink) {
       const target = hyperlink(decrypt(r));
-      if (target.trim() && !isFragment(target)) ctx.link(target, location, { sheet: clip(s.name), source: 'HLink record' });
+      if (target.trim() && !isFragment(target) && ctx.link(target, location, { sheet: clip(s.name), source: 'HLink record' }).action === 'strip') edits.hyperlinks.add(r.offset);
     } else if (nameOf && !macroSheet && FORMULA_AT.has(r.type)) {
       // A macro sheet's formulas are its macros, which its own finding covers.
       const b = decrypt(r);
@@ -177,18 +250,49 @@ async function sheetRules(ctx: RunContext, cfb: CompoundFile, stream: CfbEntry, 
   }
 }
 
-/** Whether an Obj record (MS-XLS 2.4.181) holds an FtMacro subrecord, the macro a click runs. */
-function objMacro(b: Uint8Array): boolean {
-  let at = 0;
-  while (at + 4 <= b.length) {
-    const ft = b[at] | (b[at + 1] << 8);
-    const cb = b[at + 2] | (b[at + 3] << 8);
-    // FtEnd ends the list, and FtLbsData's length does not count all its data, so the walk stops there.
-    if (ft === 0x00 || ft === 0x13) return false;
-    if (ft === 0x04) return cb > 0;
-    at += 4 + cb;
+/**
+ * The FtMacro subrecord of an Obj record (MS-XLS 2.4.181), the macro a click runs, with the name its formula refers
+ * to when the formula is one PtgName or PtgNameX and nothing else. Undefined when the record has none.
+ */
+function objMacro(b: Uint8Array): { ref?: BiffNameRef } | undefined {
+  for (const { ft, data: f } of objSubrecords(b)) {
+    if (ft !== 0x04) continue;
+    if (f.length === 0) return undefined;
+    // As Excel writes it: cce in 15 bits, 4 unused bytes, and the tokens. PtgName and PtgNameX are classed tokens,
+    // 0x23, 0x43 or 0x63 and 0x39, 0x59 or 0x79; a base token below 0x20 shares their low bits and is neither.
+    const cce = f.length >= 2 ? (f[0] | (f[1] << 8)) & 0x7fff : 0;
+    const rgce = f.subarray(6, 6 + cce);
+    const ptg = rgce[0] ?? 0;
+    const u32 = (k: number) => (rgce[k] | (rgce[k + 1] << 8) | (rgce[k + 2] << 16) | (rgce[k + 3] << 24)) >>> 0;
+    if (ptg >= 0x20 && (ptg & 0x1f) === 0x03 && cce === 5 && rgce.length === 5) return { ref: { kind: 'name', index: u32(1) } };
+    if (ptg >= 0x20 && (ptg & 0x1f) === 0x19 && cce === 7 && rgce.length === 7) return { ref: { kind: 'namex', ixti: rgce[1] | (rgce[2] << 8), index: u32(3) } };
+    return {};
   }
-  return false;
+  return undefined;
+}
+
+/**
+ * The control an Obj record keeps in the Ctls stream: FtPioGrbit says an ActiveX control (fCtl) whose data is in Ctls
+ * (fPrstm), and FtPictFmla gives its ProgID, in the formula's embedInfo, and its place in Ctls after the formula.
+ */
+function ctlsControl(b: Uint8Array): { progId: string; position: number; size: number } | undefined {
+  let flags = 0;
+  for (const { ft, data: d } of objSubrecords(b)) {
+    if (ft === 0x08 && d.length >= 2) flags = d[0] | (d[1] << 8);
+    if (ft !== 0x09 || (flags & 0x30) !== 0x30 || d.length < 2) continue;
+    // ObjFmla: cbFmla, then cce, 4 unused bytes, the tokens, and PictFmlaEmbedInfo: 0x03, cbClass, a reserved byte
+    // and the class name. lPosInCtlStm and cbBufInCtlStm follow.
+    const cbFmla = d[0] | (d[1] << 8);
+    const f = d.subarray(2, 2 + cbFmla);
+    const cce = f.length >= 2 ? (f[0] | (f[1] << 8)) & 0x7fff : 0;
+    const info = f.subarray(6 + cce);
+    const progId = info[0] === 0x03 && info.length >= 4 ? xlString(info, 3, info[1]).text : '';
+    const after = 2 + cbFmla;
+    if (after + 8 > d.length) return undefined;
+    const u32 = (k: number) => (d[k] | (d[k + 1] << 8) | (d[k + 2] << 16) | (d[k + 3] << 24)) >>> 0;
+    return { progId, position: u32(after), size: u32(after + 4) };
+  }
+  return undefined;
 }
 
 /** The target of an HLink record: its Hyperlink Object (MS-OSHARED 2.3.7.1) after the cell range and class id. */

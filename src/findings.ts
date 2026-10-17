@@ -150,7 +150,9 @@ def(C.Embedded, D.PluginScrubbed, 'info', 10, 'An embedded file was cleaned and 
 def(C.Embedded, D.PluginFailed, 'strip', 0, '<Plugin {plugin}|A plugin> failed, so the embedded file was removed');
 def(C.Embedded, D.PluginRemoved, 'strip', 0, 'An embedded file was removed by <plugin {plugin}|a plugin>');
 // CONTROL
-def(C.Control, D.ActiveX, 'strip', 50, 'An ActiveX control');
+def(C.Control, D.ActiveX, 'strip', 50, 'An ActiveX control<: {reason}|>');
+def(C.Control, D.FormsControl, 'info', 10, 'A Forms 2.0 control<, {className}|>, whose persisted properties office-defuse read');
+def(C.Control, D.ControlPicture, 'strip', 10, "A control's picture for printing, a Windows metafile");
 // PROCESSING
 def(C.Processing, D.VerificationFailed, 'reject', 0, 'The defused output did not pass its own inspection, so nothing was written');
 

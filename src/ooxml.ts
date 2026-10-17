@@ -1,12 +1,13 @@
 import { autoName } from './biff';
-import { CompoundFile } from './cfb';
+import { CompoundFile, guid } from './cfb';
 import { type ContainedDecision, decideContained, presence } from './contained';
 import { clip, ownMacro, type Reported, type ZipContext } from './context';
 import { StopError } from './errors';
 import { FieldStack } from './fields';
 import { type Format, OOXML_FORMATS, XPS_FORMATS, XPS_SEQUENCE } from './formats';
+import { bagProblem, controlProblem, controlStorageProblem, FORMS_CONTROLS, OOXML_CONTROL_STREAMS } from './forms';
 import { FunctionCalls, Quotes } from './formulas';
-import { SpillSink } from './io';
+import { bufferSource, SpillSink } from './io';
 import { isAbsoluteTarget, isFragment } from './links';
 import { compoundRules, nestedNotes } from './objects';
 import { attributeKey, CompoundPlan } from './plan';
@@ -100,6 +101,7 @@ export const R_NS = new Set(['http://schemas.openxmlformats.org/officedocument/2
 const CUSTOM_UI_NS = new Set(['http://schemas.microsoft.com/office/2006/01/customui', 'http://schemas.microsoft.com/office/2009/07/customui']);
 const VML_EXCEL_NS = 'urn:schemas-microsoft-com:office:excel';
 const VISIO_NS = 'http://schemas.microsoft.com/office/visio/2012/main';
+const ACTIVEX_NS = 'http://schemas.microsoft.com/office/2006/activex';
 const EXTENDED_NS = new Set(['http://schemas.openxmlformats.org/officedocument/2006/extended-properties', 'http://purl.oclc.org/ooxml/officedocument/extendedproperties']);
 /**
  * The attributes of a SpreadsheetML data connection that name where it loads from (ECMA-376 18.13): an ODC file or an
@@ -127,6 +129,27 @@ export interface Part {
   ole: boolean;
   /** For a VBA project part read before the XML parts, what became of it. */
   vba?: ContainedDecision;
+  /** For an activeX part, the control its ax:ocx element describes. */
+  activeX?: ActiveXInfo;
+  /** For an activeX part, what the check of its control found. */
+  forms?: FormsVerdict;
+  /** A binary part that holds the data of a Forms 2.0 control that stays. */
+  formsData?: boolean;
+}
+
+/** What an activeX part's ax:ocx element says: the class, how the control persists itself, and a property bag. */
+export interface ActiveXInfo {
+  classId: string;
+  persistence?: string;
+  props: Array<{ name: string; value: string }>;
+  /** An element below ax:ocxPr, such as a font or picture, or one ax:ocx does not hold. */
+  nested: boolean;
+}
+
+/** An activeX part's control as checked: its class, and why it may not be a Forms 2.0 control as Office writes one. */
+interface FormsVerdict {
+  classId?: string;
+  problem?: string;
 }
 
 /** What the rewrite needs of an OOXML package: its parts, which part each relationships part belongs to, and the roots. */
@@ -324,6 +347,8 @@ class PartRules implements XmlHandler {
   private hyperlinkBase?: { shown: Shown; index: number };
   /** The parts this XPS part names in its markup, by key, which count as reached from it. */
   readonly refs = new Set<string>();
+  /** The control an activeX part describes in its ax:ocx element. */
+  activeX?: ActiveXInfo;
   /**
    * The labels of the hyperlinks the part names by relationship Id: their text, tooltips and display text. The
    * relationships part comes after the part, so the targets are compared with these as it is read.
@@ -372,6 +397,15 @@ class PartRules implements XmlHandler {
 
   start(el: XmlElement): void {
     const ns = this.lowerNs(el);
+    // Below ax:ocx only ax:ocxPr may stand, and nothing below it: anything else marks the bag as more than plain values.
+    if (this.activeX && (el.depth > 2 || (el.depth === 2 && !(ns === ACTIVEX_NS && el.local === 'ocxPr')))) this.activeX.nested = true;
+    if (ns === ACTIVEX_NS) {
+      const value = (local: string) => el.attributes.find(a => a.ns.toLowerCase() === ACTIVEX_NS && a.local === local)?.value;
+      if (el.depth === 1 && el.local === 'ocx') this.activeX = { classId: value('classid') ?? '', persistence: value('persistence'), props: [], nested: false };
+      else if (this.activeX && el.depth === 2 && el.local === 'ocxPr') this.activeX.props.push({ name: value('name') ?? '', value: value('value') ?? '' });
+      else if (this.activeX) this.activeX.nested = true;
+      return;
+    }
     if (CUSTOM_UI_NS.has(ns)) {
       if (el.depth === 1) this.ctx.report(C.Ui, D.Ribbon, this.part);
       for (const a of el.attributes) {
@@ -655,6 +689,7 @@ export async function inspectOoxml(ctx: ZipContext, contentTypes: ZipEntry, oute
       const rules = new PartRules(ctx, p.entry.name);
       await ctx.parse(p.entry, rules, ct === TYPE.vml);
       if (rules.labels.size) labelsOf.set(key, rules.labels);
+      if (rules.activeX) p.activeX = rules.activeX;
       for (const k of rules.refs) {
         const t = parts.get(k);
         if (t && t !== p) p.targets.add(t);
@@ -672,6 +707,8 @@ export async function inspectOoxml(ctx: ZipContext, contentTypes: ZipEntry, oute
   // Relationships of parts that are not there still say what the parts they reach are.
   for (const [source, rels] of relsOf) if (source !== '' && !parts.has(source)) await readRelationships(ctx, rels, r => relate(rels, undefined, r));
 
+  // Controls are checked before any part's own rules, since a Forms 2.0 control that stays keeps its binary part.
+  for (const p of parts.values()) if (TYPE.control.has(p.contentType ?? '') || (p.reachedAs & AS.control) !== 0) p.forms = await formsControl(ctx, p);
   for (const p of parts.values()) await partRules(ctx, p);
   unreferenced(ctx, parts, relsOf, roots);
   plan.graph = { contentTypes, parts, relsOf, roots, strict, xps };
@@ -697,6 +734,8 @@ async function partRules(ctx: ZipContext, p: Part): Promise<void> {
   // Besides OLE parts and packages, every part that is a whole file in a format of its own, such as an image, goes
   // to the plugins. Such a part has no rule of its own, so one no plugin takes stays.
   const wholeFile = !isXmlType(p.contentType) && !formatBinary(ct);
+  // The data of a Forms 2.0 control that stays was read with the control, and stays with it.
+  if (p.formsData) return;
   const contained = vba || ole || pkg || controlBinary || p.ole || wholeFile;
   // With script plugins, a VBA project part is read here, so its modules go to them, rather than to the file plugins.
   const vbaDecision = p.vba ?? (vba && ctx.run.options.scriptPlugins !== undefined ? await vbaPart(ctx, p.entry, loc) : undefined);
@@ -708,10 +747,58 @@ async function partRules(ctx: ZipContext, p: Part): Promise<void> {
   if ((TYPE.macrosheet.has(ct) || as(AS.macrosheet)) && ctx.report(C.Macro, D.XlmMacrosheet, loc, data).action === 'strip') ctx.plan.sheets.add(key);
   if (ole) found.push(ctx.report(C.Embedded, D.OleObject, loc, data, act));
   if (pkg) found.push(ctx.report(C.Embedded, D.Package, loc, data, act));
-  if (control || (controlBinary && !p.claimed)) found.push(ctx.report(C.Control, D.ActiveX, loc, data, control ? undefined : act));
+  if (control && p.forms && !p.forms.problem) found.push(ctx.report(C.Control, D.FormsControl, loc, { ...data, clsid: p.forms.classId ?? '' }));
+  else if (control || (controlBinary && !p.claimed)) {
+    const why = control && p.forms ? { ...(p.forms.classId ? { clsid: p.forms.classId } : {}), ...(p.forms.problem ? { reason: clip(p.forms.problem) } : {}) } : {};
+    found.push(ctx.report(C.Control, D.ActiveX, loc, { ...data, ...why }, control ? undefined : act));
+  }
   if (p.ole && !vba && !ole && !control && !controlBinary && !pkg) found.push(ctx.report(C.Embedded, D.OleFile, loc, data, act));
   if (decision ? !decision.keep : found.some(f => f.action === 'strip')) ctx.plan.drop.add(key);
   else if (decision?.replacement) ctx.plan.replace.set(key, decision.replacement);
+}
+
+/** Bytes a Forms 2.0 control's binary part holds at most, pictures left out. */
+const MAX_CONTROL_DATA = 65536;
+
+/**
+ * Checks the control an activeX part describes as a Forms 2.0 control that Office persisted: by its class, and by
+ * its properties, read from the property bag in the part or from the binary part its relationship names. A control
+ * persisted as a stream starts with its class id; one persisted as a storage holds its CompObj and contents. A
+ * control that passes marks its binary part, which then stays with it.
+ */
+async function formsControl(ctx: ZipContext, p: Part): Promise<FormsVerdict> {
+  const ax = p.activeX;
+  if (!ax) return { problem: 'its part has no ax:ocx element' };
+  const classId = ax.classId.replace(/[{}]/g, '').trim().toUpperCase();
+  if (!FORMS_CONTROLS.has(classId)) return { classId, problem: 'its class is not a Forms 2.0 control office-defuse reads' };
+  const binaries = [...p.targets].filter(t => t.claimed);
+  const persistence = ax.persistence ?? 'persistStreamInit';
+  if (persistence === 'persistPropertyBag') {
+    if (binaries.length) return { classId, problem: 'a property bag with a binary part' };
+    return { classId, problem: bagProblem(classId, ax.props, ax.nested) };
+  }
+  if (ax.props.length || ax.nested) return { classId, problem: `properties in its part beside ${persistence}` };
+  if (binaries.length !== 1) return { classId, problem: 'it has no binary part, or more than one' };
+  const bin = binaries[0];
+  if (bin.entry.size > MAX_CONTROL_DATA) return { classId, problem: 'its binary part is larger than a Forms 2.0 control without pictures' };
+  const chunks: Uint8Array[] = [];
+  for await (const c of ctx.zip.read(bin.entry)) chunks.push(c);
+  const bytes = Buffer.concat(chunks);
+  let problem: string | undefined;
+  if (persistence === 'persistStreamInit' || persistence === 'persistStream') {
+    problem = bytes.length < 16 || guid(bytes, 0) !== classId ? 'its binary part names another class' : controlProblem(classId, bytes.subarray(16));
+  } else if (persistence === 'persistStorage') {
+    let cfb: CompoundFile | undefined;
+    try {
+      cfb = await CompoundFile.open(bufferSource(bytes), ctx.settings, ctx.run.deadline);
+    } catch (e) {
+      if (!(e instanceof StopError) || e.category !== C.Container) throw e;
+      problem = `its binary part is not a compound file: ${e.message}`;
+    }
+    if (cfb) problem = await controlStorageProblem(cfb, cfb.root, OOXML_CONTROL_STREAMS, classId);
+  } else problem = `its persistence is ${persistence}`;
+  if (!problem) bin.formsData = true;
+  return { classId, problem };
 }
 
 /**

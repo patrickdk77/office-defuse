@@ -148,6 +148,8 @@ export enum OfficeDetail {
   PluginRemoved = 'PLUGIN_REMOVED',
   // CONTROL
   ActiveX = 'ACTIVEX',
+  FormsControl = 'FORMS_CONTROL',
+  ControlPicture = 'CONTROL_PICTURE',
   // PROCESSING
   VerificationFailed = 'VERIFICATION_FAILED',
 }

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.4 - 2026-10-16
+
+- Forms 2.0 controls stay: CommandButton, Label, TextBox, ListBox, ComboBox, CheckBox, OptionButton, ToggleButton, SpinButton and ScrollBar, when their persisted properties read as Office writes them and hold no picture. The new CONTROL/FORMS_CONTROL, `info`, reports each. It covers OOXML activeX parts persisted as a stream, a storage or a property bag, Word's control storages and Excel's `Ctls` stream. Every other control is CONTROL/ACTIVEX as before, now with `data.reason`.
+- A Word control's picture for printing, its `\x03PRINT` metafile, is the new CONTROL/CONTROL_PICTURE, `strip`, and goes while the control stays.
+- Excel workbooks are written again record by record instead of rejected. A macro sheet becomes an empty worksheet, a name that runs a macro is renamed, a button or shape loses its macro, a hyperlink goes, and an external workbook, DDE or OLE link points at the workbook itself. The stream positions in BoundSheet8, Index, DBCell and ExtSST follow. Excel 5.0 and 95 workbooks get the sheet and name edits.
+- PowerPoint 97 to 2003 presentations are written again as a full save. Objects, controls and VBA projects that go take the records that name them, actions that run a program, a macro or an OLE verb do nothing, unsafe hyperlinks go, and linked media lose their path. A VBA project in a presentation goes to the script plugins like any other.
+- An encrypted workbook or presentation that is written again, as one VelvetSweatshop opens is, comes out decrypted. A presentation with a Pictures or EncryptedSummary stream, which is encrypted too, is not written again.
+- .ppa add-ins are read as PowerPoint files. 0.2.3 called them PACKAGE/UNRECOGNIZED.
+- A button macro's formula in an Excel Obj record is read as Excel writes it, with no size before the token count.
+
 ## 0.2.3 - 2026-10-16
 
 - `scriptPlugins` shows each module of a VBA project to script plugins, such as script-defuse's `formScriptPlugin`. A project whose modules all pass stays, written without its compiled code, so Office compiles the source the plugins read and stomped p-code never reaches the output. The `vbaProject.bin` of an OOXML package and the project storages of a compound file go to the plugins. A project inside an embedded object or a PowerPoint 97 presentation goes as before.

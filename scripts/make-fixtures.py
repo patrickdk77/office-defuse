@@ -2798,7 +2798,37 @@ VBA_FIXTURES = [
     # Compound files: a Word document with its project in Macros, and a workbook with its project in _VBA_PROJECT_CUR.
     ('safe.doc', lambda: word_doc('Inert text.\r', extra=[Storage('Macros', vba_storages([VBA_DOCUMENT]))])),
     ('safe.xls', lambda: xls([('Sheet1', 0, 0x10)], extra=[Storage('_VBA_PROJECT_CUR', vba_storages([VBA_WORKBOOK, VBA_TOTALS]))])),
+    # A workbook whose buttons run a macro of its own project, by an external name of the SupBook that is the workbook
+    # itself, and a macro of another workbook.
+    ('button.xls', lambda: button_xls()),
+    # A presentation whose VBA project is stored compressed, with an action that runs one of its macros and an action
+    # that opens a hyperlink to a local file.
+    ('vba.ppt', lambda: vba_ppt()),
+    # A PowerPoint 97 to 2003 add-in, whose root is its VBA project.
+    ('addin.ppa', lambda: cfb(vba_storages([VBA_TOTALS]), root_clsid='817246F0-720A-11CF-8718-00AA0060263B')),
 ]
+
+
+def vba_ppt():
+    vba_info = prec(0x03FF, prec(0x0400, struct.pack('<III', 4, 1, 2)), container=True)
+    links = prec(0x0409, prec(0x040A, struct.pack('<I', 8)) + prec(0x0FD7, prec(0x0FD3, struct.pack('<I', 7)) + cstring('Inert notes', 0) + cstring('C:\\inert\\notes.txt', 1), container=True), container=True)
+    actions = prec(0xF00D, prec(0x0FF2, prec(0x0FF3, struct.pack('<IIBBBBB3x', 0, 0, 1, 0, 0, 0, 0)) + cstring('SumColumn', 2), container=True)
+                   + prec(0x0FF2, prec(0x0FF3, struct.pack('<IIBBBBB3x', 0, 7, 4, 0, 0, 0, 0)), instance=1, container=True), container=True)
+    return ppt(objects=[(4, ex_ole_stg(cfb(vba_storages([VBA_TOTALS])), True))], document=links + vba_info, slides=actions)
+
+
+def button_obj(ixti):
+    """An Obj record for a button whose FtMacro, as Excel writes it, holds cce, 4 unused bytes and a PtgNameX."""
+    cmo = struct.pack('<HHHHH', 0x15, 0x12, 7, 1, 0x6011) + bytes(12)
+    fmla = struct.pack('<HI', 7, 0) + b'\x39' + struct.pack('<HI', ixti, 1) + b'\x00'
+    return rec(0x005D, cmo + struct.pack('<HH', 0x04, len(fmla)) + fmla + struct.pack('<HH', 0, 0))
+
+
+def button_xls():
+    links = (rec(0x01AE, struct.pack('<HH', 1, 0x0401)) + extern_name('SumColumn', 0) + supbook(1, 'inert.xls') + extern_name('Remote', 0)
+             + rec(0x0017, struct.pack('<H', 2) + struct.pack('<Hhh', 0, -2, -2) + struct.pack('<Hhh', 1, -2, -2)))
+    return xls([('Sheet1', 0, 0x10)], globals_extra=links, extra=[Storage('_VBA_PROJECT_CUR', vba_storages([VBA_WORKBOOK, VBA_TOTALS]))],
+               sheet_extra={'Sheet1': button_obj(0) + button_obj(1)})
 
 
 def vba_fixtures():
@@ -2807,6 +2837,177 @@ def vba_fixtures():
     shutil.rmtree(folder, ignore_errors=True)
     os.makedirs(folder)
     for name, build in VBA_FIXTURES:
+        with open(os.path.join(folder, name), 'wb') as f:
+            f.write(build())
+
+
+# ---------- Forms 2.0 controls (MS-OFORMS) ----------
+
+CHECKBOX = '8BD21D40-EC42-11CE-9E0D-00AA006002F3'
+OPTIONBUTTON = '8BD21D50-EC42-11CE-9E0D-00AA006002F3'
+COMMANDBUTTON = 'D7053240-CE69-11CD-A777-00DD01143C57'
+TEXTBOX = '8BD21D10-EC42-11CE-9E0D-00AA006002F3'
+FLASH = 'D27CDB6E-AE6D-11CF-96B8-444553540000'
+
+# The kinds of each control's properties in mask order, as MS-OFORMS 2.2 lists them.
+BUTTON_PROPS = ['u32', 'u32', 'u32', 'string', 'u32', 'pair', 'u8', 'picture', 'u16', 'flag', 'picture']
+MORPH_PROPS = ['u32', 'u32', 'u32', 'u32', 'u8', 'u8', 'u8', 'u8', 'pair', 'u16', 'u32', 'u16', 'u16', 'u16', 'u16', 'u16',
+               'u8', 'u8', 'u8', 'undefined', 'u8', 'u8', 'string', 'string', 'u32', 'u32', 'u32', 'picture', 'picture', 'u16', 'undefined', 'flag', 'string']
+TEXT_PROPS = ['string', 'u32', 'u32', 'u32', 'u8', 'u8', 'u8', 'u16']
+
+
+def ax_block(kinds, values, wide=False):
+    """A Forms 2.0 property block: version 2.0, its size, the property mask, then the data block, where each number is
+    aligned to its size from the block's start, and the extra data block with pairs and strings, each aligned to 4.
+    `values` maps a property's index to its value: a number, a (width, height) pair or a string. A picture writes the
+    -1 that stands for stream data, without the stream data."""
+    mask = 0
+    body = bytearray(bytes(8 if wide else 4))
+    head = 4
+    extra = []
+
+    def align(n):
+        while (head + len(body)) % n:
+            body.append(0)
+    for i, kind in enumerate(kinds):
+        if i not in values:
+            continue
+        mask |= 1 << i
+        v = values[i]
+        if kind in ('u8', 'u16', 'u32', 'picture'):
+            n = {'u8': 1, 'u16': 2, 'u32': 4, 'picture': 2}[kind]
+            align(n)
+            body += (0xFFFF if kind == 'picture' else v).to_bytes(n, 'little')
+        elif kind == 'string':
+            align(4)
+            raw = v.encode('latin1')
+            body += struct.pack('<I', len(raw) | 0x80000000)
+            extra.append(raw)
+        elif kind == 'pair':
+            extra.append(struct.pack('<ii', *v))
+    align(4)
+    for x in extra:
+        body += x
+        align(4)
+    body[0:8 if wide else 4] = struct.pack('<Q' if wide else '<I', mask)
+    return b'\x00\x02' + struct.pack('<H', len(body)) + bytes(body)
+
+
+def text_props(font='Inert Sans'):
+    return ax_block(TEXT_PROPS, {0: font, 2: 165})
+
+
+def checkbox_data(caption='Inert box', trailing=b''):
+    return ax_block(MORPH_PROPS, {0: 0x2C80081B, 6: 4, 8: (2000, 500), 22: '0', 23: caption}, wide=True) + text_props() + trailing
+
+
+def button_data(caption='Inert run', picture=False):
+    values = {3: caption, 5: (2400, 700)}
+    if picture:
+        values[7] = True
+    return ax_block(BUTTON_PROPS, values) + text_props()
+
+
+def activex_xml(classid, persistence, props=(), extra=''):
+    """An activeX part: ax:ocx with its class and persistence, a relationship to its binary unless it is a property
+    bag, the bag's properties, and `extra` markup inside ax:ocx after them."""
+    rid = '' if persistence == 'persistPropertyBag' else ' r:id="rId1"'
+    inner = ''.join('<ax:ocxPr ax:name="%s" ax:value="%s"/>' % p for p in props) + extra
+    return ('<?xml version="1.0" encoding="UTF-8" standalone="no"?>\n<ax:ocx ax:classid="{%s}" ax:persistence="%s"%s xmlns:ax="http://schemas.microsoft.com/office/2006/activeX" '
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">%s</ax:ocx>' % (classid, persistence, rid, inner)).encode()
+
+
+def stream_binary(classid, data):
+    """A control persisted as a stream: its class id, then its properties."""
+    return clsid_bytes(classid) + data
+
+
+def storage_binary(classid, prog_id, data):
+    """A control persisted as a storage: its CompObj and its contents stream."""
+    return cfb([Stream('\x01CompObj', comp_obj('Microsoft Forms 2.0 Control', prog_id)), Stream('contents', data)], root_clsid=classid)
+
+
+def controls_xlsx(controls, kind='xlsx', vba_modules=None):
+    """A workbook whose sheet holds `controls`, each (classid, persistence, binary or None, bag properties), as Excel
+    writes them: an activeX part per control that the sheet's relationships reach, and its binary part."""
+    parts, overrides, sheet_rels, cells = [], [], [], []
+    for n, (classid, persistence, binary, props, *extra) in enumerate(controls, 1):
+        parts.append(('xl/activeX/activeX%d.xml' % n, activex_xml(classid, persistence, props, *extra)))
+        overrides.append(('xl/activeX/activeX%d.xml' % n, 'application/vnd.ms-office.activeX+xml'))
+        if binary is not None:
+            parts.append(('xl/activeX/_rels/activeX%d.xml.rels' % n, rels(rel('rId1', MSR + 'activeXControlBinary', 'activeX%d.bin' % n))))
+            parts.append(('xl/activeX/activeX%d.bin' % n, binary))
+            overrides.append(('xl/activeX/activeX%d.bin' % n, 'application/vnd.ms-office.activeX'))
+        sheet_rels.append(rel('rIdC%d' % n, RT + 'control', '../activeX/activeX%d.xml' % n))
+        cells.append('<control shapeId="%d" r:id="rIdC%d" name="InertControl%d"/>' % (1024 + n, n, n))
+    workbook_rels = []
+    if vba_modules:
+        parts.append(('xl/vbaProject.bin', vba_bin(vba_modules)))
+        overrides.append(('xl/vbaProject.bin', 'application/vnd.ms-office.vbaProject'))
+        workbook_rels.append(rel('rId2', MSR + 'vbaProject', 'vbaProject.bin'))
+    return zip_bytes(xlsx(kind=kind, sheet='<sheetData/><controls>%s</controls>' % ''.join(cells), parts=parts, overrides=overrides, sheet_rels=sheet_rels, workbook_rels=workbook_rels))
+
+
+def word_control(classid, prog_id, data, name='InertField', clsid=True):
+    """A control's storage in a Word document's ObjectPool: CompObj, its name, ObjInfo, its contents and a picture
+    for printing."""
+    return ([Stream('\x01CompObj', comp_obj('Microsoft Forms 2.0 Control', prog_id)), Stream('\x03OCXNAME', (name + '\0').encode('utf-16-le')),
+             Stream('\x03ObjInfo', b'\x00\x12\x03\x00\x04\x00'), Stream('contents', data), Stream('\x03PRINT', b'\x08\x00inert metafile')], classid if clsid else None)
+
+
+VBA_SHEET_BUTTON = VbaModule('Sheet1', 'document', 'Private Sub InertControl2_Click()\r\n    Cells(3, 3).Value = Cells(3, 3).Value + 1\r\nEnd Sub\r\n')
+
+CONTROL_FIXTURES = [
+    # Forms 2.0 controls as Excel persists them: a check box as a stream, a button that runs a macro as a storage, an
+    # option button in a property bag. And a Flash control, which is no Forms 2.0 control.
+    ('forms.xlsm', lambda: controls_xlsx([(CHECKBOX, 'persistStreamInit', stream_binary(CHECKBOX, checkbox_data()), ()),
+                                          (COMMANDBUTTON, 'persistStorage', storage_binary(COMMANDBUTTON, 'Forms.CommandButton.1', button_data()), ()),
+                                          (OPTIONBUTTON, 'persistPropertyBag', None, (('Caption', 'Inert option'), ('Size', '2000;500'), ('Value', '0'))),
+                                          (FLASH, 'persistPropertyBag', None, (('Movie', 'https://example.invalid/inert.swf'),))],
+                                         kind='xlsm', vba_modules=[VBA_SHEET_BUTTON])),
+    # Forms 2.0 classes whose data office-defuse refuses: a button with a picture, a check box with bytes after its
+    # properties, a stream that names another class than its part, a property bag with a picture, and one with an
+    # element of another namespace beside its properties.
+    ('forms-refused.xlsx', lambda: controls_xlsx([(COMMANDBUTTON, 'persistStreamInit', stream_binary(COMMANDBUTTON, button_data(picture=True)), ()),
+                                                  (CHECKBOX, 'persistStreamInit', stream_binary(CHECKBOX, checkbox_data(trailing=b'inert')), ()),
+                                                  (CHECKBOX, 'persistStreamInit', stream_binary(OPTIONBUTTON, checkbox_data()), ()),
+                                                  (CHECKBOX, 'persistPropertyBag', None, (('Picture', 'rIdP1'),)),
+                                                  (CHECKBOX, 'persistPropertyBag', None, (('Caption', 'Inert'),), '<inert:extra xmlns:inert="urn:inert"/>')])),
+    # Workbooks whose Ctls stream holds a check box and a button, and the same with bytes no control's place covers.
+    ('forms.xls', lambda: controls_xls([('Forms.CheckBox.1', CHECKBOX, checkbox_data()), ('Forms.CommandButton.1', COMMANDBUTTON, button_data())])),
+    ('forms-gap.xls', lambda: controls_xls([('Forms.CheckBox.1', CHECKBOX, checkbox_data())], gap=b'inert')),
+    # A Word document with a Forms 2.0 text box, named by its CompObj, and a Flash control.
+    ('forms.doc', lambda: word_doc('Inert text.\r', extra=[object_pool([word_control(TEXTBOX, 'Forms.TextBox.1', checkbox_data('Inert text'), clsid=False),
+                                                                         word_control(FLASH, 'ShockwaveFlash.ShockwaveFlash.1', b'inert marker')])])),
+]
+
+
+def ctls_obj(prog_id, position, size):
+    """An Obj record for an ActiveX control whose data is in the Ctls stream: FtPioGrbit with fAutoPict, fCtl and fPrstm,
+    and FtPictFmla with the ProgID in its embedInfo, then the control's place in Ctls."""
+    cmo = struct.pack('<HHHHH', 0x15, 0x12, 8, 1, 0x6011) + bytes(12)
+    pio = struct.pack('<HHH', 0x08, 2, 0x31)
+    fmla = struct.pack('<HI', 5, 0) + b'\x02' + struct.pack('<HH', 0, 0) + struct.pack('<BBBB', 3, len(prog_id), 0, 0) + prog_id.encode('latin-1')
+    pict = struct.pack('<H', len(fmla)) + fmla + struct.pack('<II', position, size) + bytes(8)
+    return rec(0x005D, cmo + pio + struct.pack('<HH', 0x09, len(pict)) + pict + struct.pack('<HH', 0, 0))
+
+
+def controls_xls(controls, gap=b''):
+    """A workbook whose sheet holds `controls`, each (ProgID, class id, data), in one Ctls stream, with `gap` before the first."""
+    ctls, objs = gap, b''
+    for prog_id, classid, data in controls:
+        blob = clsid_bytes(classid) + data
+        objs += ctls_obj(prog_id, len(ctls), len(blob))
+        ctls += blob
+    return xls([('Sheet1', 0, 0x10)], extra=[Stream('Ctls', ctls)], sheet_extra={'Sheet1': objs})
+
+
+def control_fixtures():
+    """Writes test/fixtures/controls. Needs nothing but Python."""
+    folder = os.path.join(OUT, 'controls')
+    shutil.rmtree(folder, ignore_errors=True)
+    os.makedirs(folder)
+    for name, build in CONTROL_FIXTURES:
         with open(os.path.join(folder, name), 'wb') as f:
             f.write(build())
 
@@ -3014,6 +3215,7 @@ def main():
                     fixed_times(os.path.join(OUT, sub, name))
         cases()
         vba_fixtures()
+        control_fixtures()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
     count = sum(len(files) for _, _, files in os.walk(OUT))

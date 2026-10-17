@@ -1,8 +1,9 @@
-import { type CfbEntry, CompoundFile, entryPath } from './cfb';
+import { type CfbEntry, CompoundFile, entryPath, showName } from './cfb';
 import { writeCfb } from './cfb-writer';
 import { type ContainedDecision, decideContained, presence, spillOf } from './contained';
 import { clip, type Reported, type RunContext } from './context';
 import { StopError } from './errors';
+import { controlStorageProblem, WORD_CONTROL_STREAMS } from './forms';
 import { rangeChunks, readAll, SpillSink } from './io';
 import { decideVba } from './macros';
 import { type PackagedFile, parseCompObj, parseOleStream, parsePackage, replaceSized, sizedStream } from './oleobj';
@@ -195,7 +196,16 @@ async function objectRules(ctx: RunContext, cfb: CompoundFile, e: CfbEntry, loca
   if (d.clsid) data.clsid = d.clsid;
   if (d.progId) data.progId = clip(d.progId);
   if (d.userType) data.className = clip(d.userType);
-  if (d.control) return [ctx.report(C.Control, D.ActiveX, location, d.controlName ? { ...data, name: clip(d.controlName) } : data)];
+  if (d.control) {
+    if (d.controlName) data.name = clip(d.controlName);
+    // A Forms 2.0 control stays when its storage and properties are as Office writes them. Its picture for printing,
+    // a metafile beside them, goes on its own.
+    const problem = await controlStorageProblem(cfb, e, WORD_CONTROL_STREAMS);
+    if (problem) return [ctx.report(C.Control, D.ActiveX, location, { ...data, reason: clip(problem) })];
+    const print = e.children.find(c => c.kind === 'stream' && c.name === '\x03PRINT');
+    if (print && ctx.report(C.Control, D.ControlPicture, `${location}/${showName(print.name)}`, { storage: location, bytes: print.size }).action === 'strip') plan?.drop.add(print);
+    return [ctx.report(C.Control, D.FormsControl, location, data)];
+  }
   const found: Reported[] = [];
   if (d.pkg) {
     Object.assign(data, packageData(d.pkg));

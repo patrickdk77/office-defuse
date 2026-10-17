@@ -109,16 +109,17 @@ describe('VBA, Excel 4.0 macros and embedded objects', () => {
 
   it('reads PowerPoint objects, compressed or not, by the persist directory, and the actions, links and media of the slides', async () => {
     const r = await inspectOffice(ole('objects.ppt'));
+    // The storages are read before the slides' actions, since a VBA project that stays keeps the actions that run it.
     expect(kinds(r)).to.deep.equal([
+      'EMBEDDED/OLE_OBJECT',
+      'EMBEDDED/EQUATION',
+      'MACRO/VBA_PROJECT',
+      'CONTROL/ACTIVEX',
       'LINK/SAFE',
       'EXTERNAL/LOCAL_FILE',
       'ACTION/RUN_PROGRAM',
       'MACRO/LINK',
       'ACTION/OLE_VERB',
-      'EMBEDDED/OLE_OBJECT',
-      'EMBEDDED/EQUATION',
-      'MACRO/VBA_PROJECT',
-      'CONTROL/ACTIVEX',
     ]);
     expect(of(r, 'ACTION/RUN_PROGRAM')[0].data).to.deep.equal({ trigger: 'click', action: 'C:\\Windows\\inert.exe' });
     expect(of(r, 'MACRO/LINK')[0].data).to.deep.equal({ trigger: 'mouse over', action: 'InertMacro' });
@@ -329,7 +330,7 @@ describe('less common records and storages', () => {
     const r = await inspectOffice(ole('ppt-variants.ppt'));
     expect(r.findings.map(f => [`${f.category}/${f.detail}`, f.data?.clsid ?? f.data?.reason])).to.deep.equal([
       ['EMBEDDED/OLE_OBJECT', 'its compressed data does not inflate to its declared size'],
-      ['CONTROL/ACTIVEX', undefined],
+      ['CONTROL/ACTIVEX', 'its class is not named'],
       ['CONTROL/ACTIVEX', 'its storage does not read: not a compound file'],
       ['MACRO/VBA_PROJECT', 'its compressed data does not inflate to its declared size'],
     ]);

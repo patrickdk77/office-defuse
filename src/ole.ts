@@ -1,7 +1,8 @@
-import type { CfbEntry, CompoundFile } from './cfb';
-import type { RunContext } from './context';
+import { type CfbEntry, type CompoundFile, guid } from './cfb';
+import { clip, type RunContext } from './context';
 import { StopError } from './errors';
 import type { Format } from './formats';
+import { controlProblem, FORMS_PROGIDS } from './forms';
 import { messageRules } from './msg';
 import { compoundRules } from './objects';
 import { openPackage, unlockWorkbook } from './offcrypto';
@@ -11,16 +12,21 @@ import { powerPointRules } from './ppt';
 import { OfficeCategory as C, OfficeDetail as D } from './types';
 import { visioRules } from './vsd';
 import { isWordTemplate, wordRules } from './word';
-import { excelRules, workbookKind } from './xls';
+import { type CtlsControl, excelRules, workbookKind } from './xls';
 import { ZipArchive } from './zip';
 
 const f = (format: string, mimeType: string): Format => ({ format, mimeType });
 
 /** The families a compound file can hold, by the stream or storage that marks each. */
-export type Family = 'word' | 'excel' | 'powerpoint' | 'visio' | 'outlook' | 'publisher' | 'project' | 'encrypted';
+export type Family = 'word' | 'excel' | 'powerpoint' | 'powerpoint-addin' | 'visio' | 'outlook' | 'publisher' | 'project' | 'encrypted';
 
 const upper = (e: CfbEntry) => e.name.toUpperCase();
 const PUBLISHER_CLSIDS = new Set(['00021200-0000-0000-00C0-000000000046', '00021201-0000-0000-00C0-000000000046']);
+/**
+ * The class id PowerPoint 97 to 2003 writes at the root of an add-in, a .ppa, whose root is its VBA project. An add-in
+ * whose project was removed keeps it, and is still an add-in.
+ */
+const PPA_CLSID = '817246F0-720A-11CF-8718-00AA0060263B';
 
 /** What the root of a compound file holds, read by the names of its children, ignoring case as MS-CFB does. */
 export function families(cfb: CompoundFile): Family[] {
@@ -31,6 +37,7 @@ export function families(cfb: CompoundFile): Family[] {
   if (stream('WORDDOCUMENT')) out.push('word');
   if (stream('WORKBOOK') || stream('BOOK')) out.push('excel');
   if (stream('POWERPOINT DOCUMENT')) out.push('powerpoint');
+  if (cfb.root.clsid === PPA_CLSID) out.push('powerpoint-addin');
   if (stream('VISIODOCUMENT')) out.push('visio');
   if (stream('__PROPERTIES_VERSION1.0')) out.push('outlook');
   // Publisher 98 and later keep their content in a Quill storage. Publisher 95 has none, and names itself by class id.
@@ -85,6 +92,8 @@ export async function compoundFormat(cfb: CompoundFile, family: Family, deadline
     }
     case 'powerpoint':
       return f('ppt', 'application/vnd.ms-powerpoint');
+    case 'powerpoint-addin':
+      return f('ppa', 'application/vnd.ms-powerpoint');
     case 'visio':
       return f('vsd', 'application/vnd.visio');
     case 'outlook':
@@ -127,17 +136,25 @@ export async function inspectCompound(ctx: RunContext, cfb: CompoundFile): Promi
   const word = stream('WordDocument');
   if (word) await wordRules(ctx, cfb, word, family === 'encrypted');
   if (family === 'excel') {
+    const found: CtlsControl[] = [];
     for (const name of ['Workbook', 'Book']) {
       const s = stream(name);
-      if (s) await excelRules(ctx, cfb, s, unlockWorkbook);
+      if (s) await excelRules(ctx, cfb, s, unlockWorkbook, plan, found);
     }
-    // Excel keeps the data of a workbook's ActiveX controls in one Ctls stream.
+    // Excel keeps the data of a workbook's ActiveX controls in one Ctls stream. It stays when every control in it is a
+    // Forms 2.0 control as Office persists one, and the Obj records account for all of it.
     const controls = stream('Ctls');
-    if (controls && controls.size > 0 && ctx.report(C.Control, D.ActiveX, controls.name, { stream: controls.name }).action === 'strip') plan.drop.add(controls);
+    if (controls && controls.size > 0) {
+      const problem = await ctlsProblem(cfb, controls, found);
+      const reported = problem
+        ? [ctx.report(C.Control, D.ActiveX, controls.name, { stream: controls.name, reason: clip(problem) })]
+        : found.map(c => ctx.report(C.Control, D.FormsControl, `${controls.name}, offset ${c.position}`, { stream: controls.name, sheet: clip(c.sheet), progId: clip(c.progId) }));
+      if (reported.some(r => r.action === 'strip')) plan.drop.add(controls);
+    }
   }
   if (family === 'outlook') await messageRules(ctx, cfb, cfb.root, 0, plan);
   const ppt = stream('PowerPoint Document');
-  if (family === 'powerpoint' && ppt) await powerPointRules(ctx, cfb, ppt);
+  if (family === 'powerpoint' && ppt) await powerPointRules(ctx, cfb, ppt, plan);
   const visio = stream('VisioDocument');
   if (family === 'visio' && visio) await visioRules(ctx, cfb, visio);
   if (family === 'encrypted') {
@@ -150,4 +167,28 @@ export async function inspectCompound(ctx: RunContext, cfb: CompoundFile): Promi
     await inspectPackage(zctx);
     if (ctx.format) ctx.run.output = { kind: 'zip', zip, plan: zctx.plan, format: ctx.format };
   }
+}
+
+/**
+ * Why the Ctls stream may hold more than Forms 2.0 controls as Office persists them, or undefined when it does not.
+ * Each control is its class id and then its properties, at the place its Obj record gives, and the places cover the
+ * stream with nothing between or after them.
+ */
+async function ctlsProblem(cfb: CompoundFile, ctls: CfbEntry, controls: CtlsControl[]): Promise<string | undefined> {
+  if (!controls.length) return 'no Obj record names a control in it';
+  if (ctls.size > 16 * 1024 * 1024) return 'it is larger than Forms 2.0 controls without pictures';
+  const bytes = await cfb.bytes(ctls);
+  let covered = 0;
+  for (const c of [...controls].sort((a, b) => a.position - b.position)) {
+    if (c.position !== covered) return `bytes at offset ${covered} that no control's place covers`;
+    if (c.position + c.size > bytes.length || c.size < 16) return `a control's place runs past the stream`;
+    const classId = FORMS_PROGIDS.get(c.progId.trim().toLowerCase());
+    if (!classId) return `a control of class ${c.progId || 'not named'}`;
+    const data = bytes.subarray(c.position, c.position + c.size);
+    if (guid(data, 0) !== classId) return `a control whose data names another class than ${c.progId}`;
+    const problem = controlProblem(classId, data.subarray(16));
+    if (problem) return problem;
+    covered = c.position + c.size;
+  }
+  return covered === bytes.length ? undefined : `${bytes.length - covered} bytes after the last control`;
 }

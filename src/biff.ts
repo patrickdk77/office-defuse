@@ -30,6 +30,8 @@ export interface BiffRecord {
 /** A sheet as BoundSheet8 (or BIFF5's BOUNDSHEET) lists it. */
 export interface Sheet {
   position: number;
+  /** Where its BoundSheet record starts in the stream. */
+  record?: number;
   /** 0 visible, 1 hidden, 2 very hidden. */
   state: number;
   /** 0 worksheet or dialog, 1 macro sheet, 2 chart, 6 VBA module. */
@@ -65,6 +67,20 @@ export class RecordReader {
     this.pos += 4 + length;
     if ((offset & 0xffff) < 4) checkTime(this.deadline);
     return { type, offset, body };
+  }
+}
+
+/**
+ * The subrecords of a BIFF8 Obj record (MS-XLS 2.4.181), each with its type, where its header starts and its data. The
+ * walk stops at FtEnd, and at FtLbsData, whose length does not count all its data.
+ */
+export function* objSubrecords(b: Uint8Array): Generator<{ ft: number; at: number; data: Uint8Array }> {
+  for (let at = 0; at + 4 <= b.length; ) {
+    const ft = b[at] | (b[at + 1] << 8);
+    const cb = b[at + 2] | (b[at + 3] << 8);
+    if (ft === 0x00 || ft === 0x13) return;
+    yield { ft, at, data: b.subarray(at + 4, at + 4 + cb) };
+    at += 4 + cb;
   }
 }
 

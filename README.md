@@ -77,7 +77,7 @@ The format comes from the content, never from the file name.
 |---|---|---|---|
 | Word | .docx .docm .dotx .dotm | .doc .dot from Word 6.0 to 2003, and .rtf | Flat OPC .xml |
 | Excel | .xlsx .xlsm .xltx .xltm .xlam .xlsb | .xls .xlt .xla from Excel 5.0 to 2003 | Flat OPC .xml |
-| PowerPoint | .pptx .pptm .potx .potm .ppsx .ppsm .ppam .sldx .sldm | .ppt from PowerPoint 97 to 2003 | Flat OPC .xml |
+| PowerPoint | .pptx .pptm .potx .potm .ppsx .ppsm .ppam .sldx .sldm | .ppt from PowerPoint 97 to 2003, and .ppa add-ins | Flat OPC .xml |
 | Visio | .vsdx .vsdm .vstx .vstm .vssx .vssm | .vsd from Visio 2000 to 2010 | |
 | XPS | .xps .oxps | | |
 | OpenDocument | .odt .ott .ods .ots .odp .otp .odg .otg .odf .odm .odb | | .fodt .fods .fodp .fodg |
@@ -91,7 +91,7 @@ A ZIP with both markers is rejected as PACKAGE/AMBIGUOUS_FORMAT, since Office co
 
 A .xlsb gets the package checks. Its sheets are binary records, and the formulas in them go unread. Its external link parts are binary too, and office-defuse reads their link records for DDE links. A .odb gets every ODF check, and the database under `database/` goes unread.
 
-A file that starts with the compound file signature is a compound file, MS-CFB. The streams and storages at its root name the format: `WordDocument` for Word, `Workbook` or `Book` for Excel, `PowerPoint Document`, `VisioDocument`, `__properties_version1.0` for an Outlook message, a `Quill` storage or Publisher's class id beside a `Contents` stream for Publisher, and a `Props` stream beside a storage named by a number for Project. Word's FIB says whether a document is a template, and Excel's records whether a workbook is a template or an add-in. Neither needs the password of an encrypted file. An Outlook template has a class id of its own. A PowerPoint 97 to 2003 template or show reports its format as .ppt, and a Visio stencil or template as .vsd.
+A file that starts with the compound file signature is a compound file, MS-CFB. The streams and storages at its root name the format: `WordDocument` for Word, `Workbook` or `Book` for Excel, `PowerPoint Document`, `VisioDocument`, `__properties_version1.0` for an Outlook message, a `Quill` storage or Publisher's class id beside a `Contents` stream for Publisher, and a `Props` stream beside a storage named by a number for Project. Word's FIB says whether a document is a template, and Excel's records whether a workbook is a template or an add-in. Neither needs the password of an encrypted file. An Outlook template has a class id of its own, and so does a PowerPoint 97 to 2003 add-in, a .ppa, whose root is its VBA project. A PowerPoint 97 to 2003 template or show reports its format as .ppt, and a Visio stencil or template as .vsd.
 
 A compound file with two of these is PACKAGE/AMBIGUOUS_FORMAT. One with none is PACKAGE/UNRECOGNIZED, and so is a `WordDocument` stream that holds no Word 6.0 to 2003 FIB. A PowerPoint 4.0 file, a bare OLE object and a `vbaProject.bin` on its own all land there.
 
@@ -131,7 +131,7 @@ In a ZIP package:
 - References that load from outside the file on their own: attached and OpenDocument templates, linked OLE objects and packages, images, frames, included files and linked sections, external workbooks, `meta:auto-reload`, and any other external relationship. A target on the machine itself is EXTERNAL/LOCAL_FILE. An empty OpenDocument reference is the document itself and names no file, so it goes unreported. A target counts as local only if its percent-decoded form is local too, because a CVE-2017-0199 sample writes its `script:` scheme as `%73cript:`.
 - Hyperlinks, with pdf-defuse's checks of the target: the scheme, file and network paths, data URLs, credentials before the host, IP hosts, punycode and mixed-script hosts, and percent-encoded hosts. A link to a place inside the document goes unreported, and so does an empty link, which is the document itself.
 - A safe link whose label is an address of another site than the one it opens is LINK/TEXT_MISMATCH. A label counts as an address when it is a web URL, a mail address, or a host with or without a path that starts with `www.` or ends in a known top-level domain. Text that only mentions an address names no site, and neither do Excel function names such as `BETA.DIST` and file names such as `moon.htm`, which look like hosts. Sites compare as in pdf-defuse: a subdomain or parent of the label's site matches, and `evil.co.uk` is not under `mybank.co.uk`. The labels are a Word hyperlink's text and tooltip, a HYPERLINK field's result and `\o` tooltip, a DrawingML run's text and a link's tooltip, an Excel hyperlink's display name and tooltip, an OpenDocument link's text and title, and the characters of an XPS Glyphs element. The rewrite removes the link and keeps its text.
-- Embedded OLE objects and packages, OLE files nothing declares as an object, Java applets, plug-ins and ActiveX controls.
+- Embedded OLE objects and packages, OLE files nothing declares as an object, Java applets, plug-ins and ActiveX controls. A Forms 2.0 control whose persisted properties read as Office writes them is CONTROL/FORMS_CONTROL, `info`, and stays. See [ActiveX controls](#activex-controls).
 - Package structure: parts without a content type, parts no relationship reaches, files the ODF manifest does not list, an irregular ODF layout, and names a package gives twice.
 - Document type declarations in XML parts, and references to external entities. See [Document types and entities](#document-types-and-entities).
 
@@ -216,13 +216,50 @@ A Flat OPC package is rewritten as the package of its parts is, then written bac
 
 ### Compound files
 
-The rewrite writes a new compound file, version 3 with 512-byte sectors, without the streams and storages a strip finding names: VBA project storages, the storages of embedded objects, linked objects and ActiveX controls, Excel's `Ctls` stream, and Outlook attachments. A VBA project that script plugins keep is written without its compiled code. A message's property stream counts its attachments, and the count drops by the ones that went.
+The rewrite writes a new compound file, version 3 with 512-byte sectors, without the streams and storages a strip finding names: VBA project storages, the storages of embedded objects, linked objects and ActiveX controls, Excel's `Ctls` stream, Word's picture for printing a control, and Outlook attachments. A VBA project that script plugins keep is written without its compiled code. A message's property stream counts its attachments, and the count drops by the ones that went.
 
 The FAT comes right after the header, so no stream lands in the first 1024 bytes, where PDF readers look for a header. When a stream ends with a ZIP end record, as an embedded package does, free sectors of zeros follow the last stream until the record is more than 65,557 bytes from the end of the file, past where ZIP readers look.
 
 An Outlook message's RTF body with a strip finding is rewritten the way an RTF file is, and stored back uncompressed, which MS-OXRTFCP allows. A body that does not decompress, or one with a `reject` finding inside, goes, and the message keeps its plain text body. The property stream entry of a body that went goes too, and that of a rewritten body takes its new size. Every other stream is copied unchanged. Sectors no stream holds, the rest of each stream's last sector and data past the last sector are not written.
 
-Content inside a stream stays as it was. That covers Word's fields, template and WordBasic macros, Excel's records for macro sheets, defined names, links, hyperlinks and buttons, every record of a PowerPoint presentation along with the objects stored in its records, the ShapeSheet cells of a Visio drawing, and the RC4 encryption of a workbook. A finding there is still in the output, so the output fails its check and the upload is rejected.
+Excel's and PowerPoint's records are written again, as the next two sections say. Content inside any other stream stays as it was: Word's fields, template and WordBasic macros, Excel's cell formulas, and the ShapeSheet cells of a Visio drawing. A finding there is still in the output, so the output fails its check and the upload is rejected.
+
+### Excel workbooks
+
+A workbook stream, Excel 97 to 2003 or Excel 5.0 and 95, is written again record by record, in the order the stream holds them:
+
+- An Excel 4.0 macro sheet becomes an empty worksheet of the same name and visibility, so formulas and names keep their sheet numbers.
+- A name that runs a macro, such as Auto_Open, is renamed `Removed_Auto_Open_1` and so on, and is no longer a built-in name. Formulas refer to names by number, so removing it would point them at the wrong name.
+- A button or shape loses the macro it runs, unless the workbook's VBA project stays and the macro is one of its own: one name of the SupBook that is the workbook itself, as Excel names a VBA macro. A defined name can stand for anything, so a button that runs one loses it.
+- A hyperlink goes with its tooltip.
+- An external workbook, DDE or OLE link keeps its SupBook record, which formulas count to by number, with a path that is the workbook itself, U+0002.
+- A workbook encrypted with VelvetSweatshop is written decrypted, without its FILEPASS record. So is any encrypted workbook that is written again, since office-defuse does not encrypt.
+
+Records change size, so the stream positions other records hold are written anew: each sheet's in BoundSheet8, the DefColWidth and DBCell positions in Index, a DBCell's offset back to its first row, and ExtSST's string positions. A position that lands where no record starts, or inside a record that changed, leaves the stream as it was, and the output check rejects the upload. Excel 5.0 and 95 workbooks get the sheet and name edits only. A cell formula that calls EXEC, CALL or WEBSERVICE is not written again.
+
+### PowerPoint presentations
+
+A presentation is written as a full save: each persist object the current edit reaches, in persist id order, then one persist directory and one UserEditAtom with no edit before it, which the Current User stream points at. A container's length follows the records left in it.
+
+- An embedded object, a linked object or an ActiveX control that goes takes its ExOleObjStg and its container in ExObjList with it. A Forms 2.0 control stays. An object a file plugin rewrote takes the plugin's bytes, compressed again when PowerPoint stored it compressed.
+- A VBA project that goes takes its VBAInfoContainer with it. One that script plugins keep is written without its compiled code inside its compressed storage.
+- An action that runs a program, a macro or an OLE verb becomes no action. A macro of a kept VBA project keeps its action.
+- A hyperlink that goes takes its ExHyperlinkContainer, and the actions that open it become no action.
+- A linked movie or sound loses its path.
+- An encrypted presentation that is written again is written decrypted, without its encryption session. Its Pictures and EncryptedSummary streams are encrypted too, and office-defuse does not decrypt them, so a presentation that has either stays as it was and the output check rejects it.
+
+## ActiveX controls
+
+An ActiveX control runs whatever code its class names, so a control goes unless office-defuse can tell it is one of the Forms 2.0 controls Office ships, as Office persisted it: CommandButton, Label, TextBox, ListBox, ComboBox, CheckBox, OptionButton, ToggleButton, SpinButton or ScrollBar. Such a control is CONTROL/FORMS_CONTROL, `info`, and stays, with or without a VBA project. An override to `strip` removes it like any other control.
+
+office-defuse reads the control's properties as MS-OFORMS lays them out and as LibreOffice reads them, and keeps the control when:
+
+- its class id, or the ProgID its CompObj, ax:ocx element or Obj record names, is one of those controls;
+- every bit of its property mask names a property MS-OFORMS defines;
+- it holds no picture or mouse icon, whose bytes are a picture file Office decodes;
+- its properties, its font and, for a list, its column infos fill its data to the last byte.
+
+The control can sit in an OOXML activeX part, persisted as a stream that starts with the class id, as a storage with a contents stream, or as a property bag with plain values. In a Word document it is a storage under ObjectPool, and its `\x03PRINT` stream, a Windows metafile Word prints in its place, goes as CONTROL/CONTROL_PICTURE. In an Excel workbook every control is in one `Ctls` stream, which stays only when the Obj records place Forms 2.0 controls over all of it. Any other control, a Forms 2.0 control with a picture, and a frame, multipage or tab strip are CONTROL/ACTIVEX with `data.reason`.
 
 ### RTF
 
@@ -283,7 +320,7 @@ A user form stays with its project when its designer storage holds Forms 2.0 con
 
 When the document's own project stays, so does what runs its macros by name: an Excel shape's `macro`, a form control's `x:FmlaMacro`, a ribbon callback, PowerPoint's `ppaction://macro` and Word's MACROBUTTON field. Their findings turn to `info`. A name that points into another file, as `'other.xlsm'!Macro`, still goes.
 
-office-defuse decides the `vbaProject.bin` part of an OOXML package, which with `scriptPlugins` set, even to an empty list, goes to the script plugins and not to the file plugins. It decides the project storages of a Word document, a workbook and the other compound files. A project inside an embedded object is for the file plugins that take the object. A PowerPoint 97 project sits compressed in records the rewrite does not change, so it goes as before.
+office-defuse decides the `vbaProject.bin` part of an OOXML package, which with `scriptPlugins` set, even to an empty list, goes to the script plugins and not to the file plugins. It decides the project storages of a Word document, a workbook, a PowerPoint 97 presentation, a .ppa add-in and the other compound files. A project inside an embedded object is for the file plugins that take the object.
 
 A source that does not decompress, or a dir stream that names a module stream that is not there, leaves nothing to check. The project goes, and MACRO/VBA_PROJECT's `data.reason` says why. The check of the output does not ask the plugins again. It matches the project by the MD5 of its references and module sources, reports the plugins' findings again, and reports MACRO/COMPILED_CODE if the output still holds p-code, which fails the check.
 
@@ -482,7 +519,7 @@ Exit codes are 0 for clean, 1 for defused or strippable, 2 for rejected and 3 fo
 
 ## What it does not check
 
-- The OLE parts of a ZIP package, such as the objects inside `oleObject*.bin` and ActiveX binaries, and `vbaProject.bin` without script plugins. office-defuse hands them to the file plugins and reads none of them itself.
+- The OLE parts of a ZIP package, such as the objects inside `oleObject*.bin`, the binaries of ActiveX controls other than Forms 2.0 ones, and `vbaProject.bin` without script plugins. office-defuse hands them to the file plugins and reads none of them itself.
 - VBA source. office-defuse reads the modules only to show them to script plugins, and without plugins reports a project whole. In a user form that stays, the controls' data and pictures in its `o` stream go unread.
 - Encrypted Word 6.0 and 95 documents. They are rejected. In a Word document encrypted with RC4 CryptoAPI, the OLE objects that Word keeps in the Data stream rather than in ObjectPool. The pictures of an encrypted presentation.
 - Formulas in .xlsb sheets, and in an Excel 5.0 or 95 workbook. A DDE link that a formula uses is found in the workbook's link records.
